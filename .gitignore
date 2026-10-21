@@ -1,0 +1,17 @@
+# Restricted MRI data and local dataset copies
+/ADNI/
+**/data/
+**/datasets/
+# Generated artifacts and model weights
+**/runs/
+**/artifacts/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/tmp/
