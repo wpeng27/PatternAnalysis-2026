@@ -1,8 +1,14 @@
-"""Train the small CNN on audited splits, without evaluating the test set.
+"""Train a baseline or evaluate a saved checkpoint without retraining.
+
+Training validates after each epoch and never evaluates the test set.
+Checkpoint evaluation defaults to validation. Test evaluation must be selected
+explicitly with --mode evaluate --eval-split test after model selection is final.
 """
 
 import argparse
+import io
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -11,6 +17,16 @@ import time
 
 # Required by CUDA's deterministic matrix operations. Set before CUDA initialises.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+# Support both direct script execution and python -m recognition.<project>.train.
+if __package__:
+    from .dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
+    from .modules import build_model
+else:
+    from dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
+    from modules import build_model
+
+PREPROCESSING = "Pillow L, bilinear 224x224, float32 /255, repeat three channels"
 
 
 def check_environment() -> dict:
@@ -66,12 +82,13 @@ def seed_worker(worker_id: int) -> None:
     np.random.seed(seed)
 
 
-def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False) -> dict:
+def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None) -> dict:
     """Sample-weighted loss and accuracy, including the final partial batch."""
     import torch
     from torch import nn
 
     training = optimizer is not None
+    phase = phase or ("train" if training else "val")
     model.train(training)
     criterion = nn.CrossEntropyLoss()
     total_loss, correct, samples, skipped_updates = 0.0, 0, 0, 0
@@ -107,7 +124,6 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False) -> 
             total_loss += loss.item() * count
             correct += (logits.argmax(dim=1) == labels).sum().item()
             if step == 1 or step % 50 == 0 or step == len(loader):
-                phase = "train" if training else "val"
                 print(f"{phase} batch {step}/{len(loader)}: loss={total_loss / samples:.4f}, "
                       f"slice_accuracy={correct / samples:.4f}", flush=True)
     if device.type == "cuda":
@@ -122,38 +138,58 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False) -> 
     return result
 
 
+def prepare_run(args):
+    """Check output paths and device, then configure reproducible execution."""
+    import torch
+
+    if args.output.exists():
+        raise ValueError("Run output already exists. Choose a new directory to preserve results.")
+    if not args.data_root.is_dir():
+        raise ValueError(f"Dataset root does not exist: {args.data_root}")
+    if args.output.resolve().is_relative_to(args.data_root.resolve()):
+        raise ValueError("Save run artifacts outside the dataset")
+    try:
+        device = torch.device(args.device)
+    except (RuntimeError, ValueError) as error:
+        raise ValueError("Device must be cpu, cuda or cuda:N") from error
+    if device.type not in {"cpu", "cuda"} or (device.type == "cpu" and device.index is not None):
+        raise ValueError("Device must be cpu, cuda or cuda:N")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA requested but unavailable. Use --device cpu for CPU execution.")
+        if device.index is not None and device.index >= torch.cuda.device_count():
+            raise ValueError(f"CUDA device index is unavailable: {device.index}")
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        torch.cuda.set_device(device)
+    seed_everything(args.seed)
+    torch.set_num_threads(args.threads)
+    return device
+
+
+def make_loader(args, rows, device, training=False):
+    import torch
+    from torch.utils.data import DataLoader
+
+    return DataLoader(
+        ADNIDataset(args.data_root, rows), batch_size=args.batch_size,
+        shuffle=training, num_workers=args.workers,
+        pin_memory=(device.type == "cuda"), drop_last=False,
+        worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed),
+        persistent_workers=(args.workers > 0),
+    )
+
+
 def train(args) -> None:
     import importlib.metadata
     import torch
-    from torch.utils.data import DataLoader
-    from dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from modules import build_model
 
-    if args.epochs < 1 or args.batch_size < 1 or args.workers < 0 or args.threads < 1:
-        raise ValueError("Epochs, batch size and threads must be positive, workers nonnegative")
-    if args.lr <= 0 or args.weight_decay < 0:
-        raise ValueError("Learning rate must be positive, weight decay nonnegative")
-    if args.output.exists():
-        raise ValueError("Run output already exists. Choose a new directory to preserve results.")
-    if args.output.resolve().is_relative_to(args.data_root.resolve()):
-        raise ValueError("Save training artifacts outside the dataset")
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable. Use --device cpu for CPU execution.")
-    seed_everything(args.seed)
-    torch.set_num_threads(args.threads)
+    device = prepare_run(args)
     splits, audit = load_splits(args.splits)
     if audit["seed"] != args.seed:
         raise ValueError("Training seed must match the saved split seed")
-    loaders = {}
-    for split in ("train", "val"):
-        loaders[split] = DataLoader(
-            ADNIDataset(args.data_root, splits[split]), batch_size=args.batch_size,
-            shuffle=(split == "train"), num_workers=args.workers,
-            pin_memory=(device.type == "cuda"), drop_last=False,
-            worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed),
-            persistent_workers=(args.workers > 0),
-        )
+    loaders = {split: make_loader(args, splits[split], device, training=(split == "train"))
+               for split in ("train", "val")}
     # Preflight one real training image before allocating model/optimizer memory.
     image, label = loaders["train"].dataset[0]
     if (image.shape != (3, IMAGE_SIZE, IMAGE_SIZE) or image.dtype != torch.float32
@@ -161,14 +197,14 @@ def train(args) -> None:
             or not torch.isfinite(image).all() or image.min() < 0 or image.max() > 1):
         raise RuntimeError("Image preprocessing preflight failed")
     print(f"Image preflight: {tuple(image.shape)}, {image.dtype}, identical grayscale channels", flush=True)
-    model = build_model("small_cnn").to(device)
+    model = build_model(args.model).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    amp = args.amp and device.type == "cuda"
+    amp = (args.amp is not False) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
-    config.update({"model": "small_cnn", "pretrained": False, "effective_amp": amp,
+    config.update({"model": args.model, "pretrained": False, "effective_amp": amp,
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
-                   "preprocessing": "Pillow L, bilinear 224x224, float32 /255, repeat three channels",
+                   "preprocessing": PREPROCESSING,
                    "augmentation": "none", "deterministic_algorithms": True,
                    "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
                    "split_sha256": audit["split_sha256"], "python": platform.python_version(),
@@ -194,7 +230,7 @@ def train(args) -> None:
         record = {"epoch": epoch, "train": training, "val": validation,
                   "peak_training_allocated_bytes": allocated, "peak_training_reserved_bytes": reserved}
         history.append(record)
-        checkpoint = {"model_name": "small_cnn", "epoch": epoch,
+        checkpoint = {"model_name": args.model, "epoch": epoch,
                       "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
                       "scaler_state_dict": scaler.state_dict(), "config": config, "history": history}
         torch.save(checkpoint, args.output / "last.pt")
@@ -206,26 +242,93 @@ def train(args) -> None:
     print(f"Completed. Artifacts: {args.output}. Test set was not evaluated.", flush=True)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-environment", action="store_true")
-    parser.add_argument("--data-root", type=Path)
-    parser.add_argument("--splits", type=Path, default=Path(__file__).parent / "artifacts/splits_seed42")
-    parser.add_argument("--output", type=Path, default=Path(__file__).parent / "artifacts/runs/small_cnn_epoch1")
-    parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
-    args = parser.parse_args()
+def evaluate(args) -> dict:
+    """Load weights and evaluate one split, without an optimizer or weight writes.
+
+    Checkpoint loading follows PyTorch's state_dict workflow:
+    https://docs.pytorch.org/tutorials/beginner/saving_loading_models.html
+    """
+    import torch
+
+    device = prepare_run(args)
+    splits, audit = load_splits(args.splits)
+    raw = args.checkpoint.read_bytes()
+    checkpoint = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
+    config = checkpoint.get("config", {})
+    if checkpoint.get("model_name") != args.model:
+        raise ValueError("Selected --model does not match the checkpoint model")
+    if config.get("class_to_index") != CLASS_TO_INDEX or config.get("preprocessing") != PREPROCESSING:
+        raise ValueError("Checkpoint class encoding or preprocessing does not match this loader")
+    if config.get("split_sha256") != audit["split_sha256"]:
+        raise ValueError("Saved splits do not match the checkpoint's original split hashes")
+    model = build_model(args.model).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    loader = make_loader(args, splits[args.eval_split], device)
+    requested_amp = config.get("effective_amp", False) if args.amp is None else args.amp
+    amp = requested_amp and device.type == "cuda"
+    metrics = run_epoch(model, loader, device, amp=amp, phase=args.eval_split)
+    result = {"mode": "evaluate", "model": args.model, "split": args.eval_split,
+              "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": sha256(raw),
+              "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
+              "device": str(device), "batch_size": args.batch_size, "effective_amp": amp,
+              "seed": args.seed, "python": platform.python_version(), "torch": str(torch.__version__),
+              "pytorch_cuda": torch.version.cuda, "metrics": metrics, "retrained": False}
+    args.output.mkdir(parents=True, exist_ok=False)
+    (args.output / "evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, indent=2), flush=True)
+    return result
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--check-environment", action="store_true", help="Run only the CUDA dependency check")
+    parser.add_argument("--mode", choices=("train", "evaluate"), default="train", help="Train or load a checkpoint")
+    # Only implemented models are advertised. Add ConvNeXt when its implementation is ready.
+    parser.add_argument("--model", choices=("small_cnn",), default="small_cnn", help="Implemented model architecture")
+    parser.add_argument("--data-root", type=Path, help="Directory containing train/AD, train/NC, test/AD, test/NC")
+    parser.add_argument("--splits", type=Path, default=Path(__file__).parent / "artifacts/splits_seed42",
+                        help="Existing audited split lists, reused without resplitting")
+    parser.add_argument("--output", "--output-dir", dest="output", type=Path,
+                        help="New output directory (default: artifacts/runs/<model>_<mode>)")
+    parser.add_argument("--epochs", type=int, default=1, help="Training epochs")
+    parser.add_argument("--batch-size", type=int, default=32, help="Training/evaluation batch size")
+    parser.add_argument("--lr", "--learning-rate", dest="lr", type=float, default=1e-3, help="AdamW learning rate")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed, must match split seed when training")
+    parser.add_argument("--workers", type=int, default=2, help="DataLoader workers, zero disables subprocesses")
+    parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU threads")
+    parser.add_argument("--device", default="cuda", help="cpu, cuda or cuda:N")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None,
+                        help="Mixed precision on CUDA (default: on in training, checkpoint setting in evaluation)")
+    parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint, required in evaluate mode")
+    parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
+    args = parser.parse_args(argv)
+    if args.epochs < 1 or args.batch_size < 1 or args.threads < 1 or args.workers < 0:
+        parser.error("Epochs, batch size and threads must be positive, workers nonnegative")
+    if not math.isfinite(args.lr) or args.lr <= 0 or not math.isfinite(args.weight_decay) or args.weight_decay < 0:
+        parser.error("Learning rate must be finite and positive, weight decay finite and nonnegative")
+    if not 0 <= args.seed < 2**32:
+        parser.error("Seed must be between 0 and 2**32 - 1")
+    if not args.check_environment:
+        if args.data_root is None:
+            parser.error("--data-root is required for training and evaluation")
+        if args.mode == "evaluate" and args.checkpoint is None:
+            parser.error("--checkpoint is required in evaluate mode")
+        if args.mode == "train" and (args.checkpoint is not None or args.eval_split is not None):
+            parser.error("--checkpoint and --eval-split require --mode evaluate")
+    if args.mode == "evaluate" and args.eval_split is None:
+        args.eval_split = "val"
+    if args.output is None:
+        args.output = Path(__file__).parent / "artifacts/runs" / f"{args.model}_{args.mode}"
+    return args
+
+
+def main(argv=None) -> None:
+    args = parse_args(argv)
     if args.check_environment:
         print(json.dumps(check_environment(), indent=2))
-    elif args.data_root is None:
-        parser.error("Training requires --data-root. Use --check-environment for the setup check.")
+    elif args.mode == "evaluate":
+        evaluate(args)
     else:
         train(args)
 
