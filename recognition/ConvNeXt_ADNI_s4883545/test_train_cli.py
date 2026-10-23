@@ -18,6 +18,14 @@ from train import PREPROCESSING, evaluate, parse_args, prepare_run
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_convnext_is_available_for_training_and_evaluation(self):
+        train_args = parse_args(["--model", "convnext_tiny", "--data-root", "ADNI/AD_NC"])
+        eval_args = parse_args(["--model", "convnext_tiny", "--data-root", "ADNI/AD_NC",
+                               "--mode", "evaluate", "--checkpoint", "best.pt"])
+        self.assertEqual(train_args.model, "convnext_tiny")
+        self.assertEqual(eval_args.model, "convnext_tiny")
+        self.assertEqual(eval_args.eval_split, "val")
+
     def test_explicit_training_options_and_aliases(self):
         args = parse_args(["--model", "small_cnn", "--data-root", "ADNI/AD_NC",
                            "--epochs", "2", "--batch-size", "8", "--learning-rate", "0.0003",

@@ -26,12 +26,12 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 # Support both direct script execution and python -m recognition.<project>.train.
 if __package__:
     from .dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from .modules import build_model
+    from .modules import MODEL_NAMES, build_model
     from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 else:
     from dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from modules import build_model
+    from modules import MODEL_NAMES, build_model
     from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 
@@ -414,8 +414,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--check-environment", action="store_true", help="Run only the CUDA dependency check")
     parser.add_argument("--mode", choices=("train", "evaluate"), default="train", help="Train or load a checkpoint")
-    # Only implemented models are advertised. Add ConvNeXt when its implementation is ready.
-    parser.add_argument("--model", choices=("small_cnn",), default="small_cnn", help="Implemented model architecture")
+    parser.add_argument("--model", choices=MODEL_NAMES, default="small_cnn", help="Implemented model architecture")
     parser.add_argument("--data-root", type=Path, help="Directory containing train/AD, train/NC, test/AD, test/NC")
     parser.add_argument("--splits", type=Path, default=Path(__file__).parent / "artifacts/splits_seed42",
                         help="Existing audited split lists, reused without resplitting")

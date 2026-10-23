@@ -29,8 +29,8 @@ class ConvNeXtBlock(nn.Module):
     (an identity block initially). The official implementation disables it at zero.
 
     dim is the feature-channel count, not necessarily the three image channels.
-    Spatial downsampling and full-model weight initialisation belong to the later
-    model assembly. This standalone block uses PyTorch's default Conv/Linear init.
+    Spatial downsampling and full-model weight initialisation belong to
+    ConvNeXtTiny. This standalone block uses PyTorch's default Conv/Linear init.
     drop_path is in [0, 1], where 1 drops the entire branch during training.
     """
 
@@ -58,6 +58,95 @@ class ConvNeXtBlock(nn.Module):
         branch = self.pwconv2(self.act(self.pwconv1(self.norm(branch))))
         branch = (branch * self.gamma).permute(0, 3, 1, 2)
         return residual + self.drop_path(branch)
+
+
+class ChannelLayerNorm(nn.LayerNorm):
+    """Normalize channels independently at each NCHW spatial position.
+
+    Adaptation of the official ConvNeXt channels-first LayerNorm: permute to
+    NHWC and use native LayerNorm, then restore NCHW. Spatial axes are not
+    normalized. Inherits the standard learnable weight and bias.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__(channels, eps=1e-6)
+
+    def forward(self, features):
+        return super().forward(features.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+class ConvNeXtTiny(nn.Module):
+    """ConvNeXt-Tiny V1 with a two-class ADNI head, initialized from scratch.
+
+    Adapted from Liu et al. (CVPR 2022), section 3.1 and the official ConvNeXt:
+    https://arxiv.org/abs/2201.03545
+    https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py
+    Copyright (c) Meta Platforms, Inc. and affiliates. See LICENSE-ConvNeXt.txt.
+
+    The stem is Conv4/stride4 -> LN. Each later stage begins with a separate
+    LN -> Conv2/stride2 downsampler. Blocks preserve shape within their stage.
+    Spatial global average pooling -> LN -> Linear produces raw logits in
+    class order [NC, AD]. There is no softmax before CrossEntropyLoss.
+
+    Adaptations: two outputs instead of 1000, native ChannelLayerNorm, and an
+    explicit AdaptiveAvgPool2d(1) equivalent to the official spatial mean.
+    Conv/Linear weights use trunc_normal_(std=0.02) and zero biases, LN uses
+    unit weights and zero biases, and layer scale starts at 1e-6 by default.
+    No pretrained weights are fetched. Seed the caller before construction.
+    Stochastic-depth probabilities increase linearly from zero to
+    drop_path_rate across all 18 blocks (default zero, as in official code).
+    """
+
+    depths = (3, 3, 9, 3)
+    dims = (96, 192, 384, 768)
+
+    def __init__(self, drop_path_rate: float = 0.0, layer_scale_init_value: float = 1e-6):
+        super().__init__()
+        if not math.isfinite(drop_path_rate) or not 0 <= drop_path_rate <= 1:
+            raise ValueError("drop_path_rate must be finite and in [0, 1]")
+        if not math.isfinite(layer_scale_init_value) or layer_scale_init_value < 0:
+            raise ValueError("layer_scale_init_value must be finite and nonnegative")
+        self.downsample_layers = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(INPUT_CHANNELS, self.dims[0], kernel_size=4, stride=4),
+                          ChannelLayerNorm(self.dims[0]))
+        ])
+        for previous, current in zip(self.dims[:-1], self.dims[1:]):
+            self.downsample_layers.append(nn.Sequential(
+                ChannelLayerNorm(previous),
+                nn.Conv2d(previous, current, kernel_size=2, stride=2),
+            ))
+        rates = torch.linspace(0, drop_path_rate, sum(self.depths)).tolist()
+        self.stages = nn.ModuleList()
+        offset = 0
+        for depth, width in zip(self.depths, self.dims):
+            self.stages.append(nn.Sequential(*[
+                ConvNeXtBlock(width, rates[offset + index], layer_scale_init_value)
+                for index in range(depth)
+            ]))
+            offset += depth
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.norm = nn.LayerNorm(self.dims[-1], eps=1e-6)
+        self.head = nn.Linear(self.dims[-1], NUM_CLASSES)
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module):
+        if isinstance(module, (nn.Conv2d, nn.Linear)):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def forward_features(self, images):
+        features = images
+        for downsample, stage in zip(self.downsample_layers, self.stages):
+            features = stage(downsample(features))
+        return self.norm(self.avgpool(features).flatten(1))
+
+    def forward(self, images):
+        return self.head(self.forward_features(images))
 
 
 class SmallCNN(nn.Module):
@@ -89,6 +178,6 @@ class SmallCNN(nn.Module):
 def build_model(name: str) -> nn.Module:
     if name == "small_cnn":
         return SmallCNN()
-    if name not in MODEL_NAMES:
-        raise ValueError(f"Unknown model {name!r}. Choose from {MODEL_NAMES}.")
-    raise NotImplementedError("ConvNeXt implementation is a later project milestone.")
+    if name == "convnext_tiny":
+        return ConvNeXtTiny()
+    raise ValueError(f"Unknown model {name!r}. Choose from {MODEL_NAMES}.")
