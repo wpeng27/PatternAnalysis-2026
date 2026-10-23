@@ -1,11 +1,63 @@
-"""Small CNN baseline. AI-assisted implementation for Weijie Peng's COMP3710 project."""
+"""ADNI model components. AI-assisted implementation for Weijie Peng's COMP3710 project."""
 
+import math
+import torch
 from torch import nn
+from torchvision.ops import StochasticDepth
 
 MODEL_NAMES = ("small_cnn", "convnext_tiny")
 NUM_CLASSES = 2
 INPUT_CHANNELS = 3
 IMAGE_SIZE = 224
+
+
+class ConvNeXtBlock(nn.Module):
+    """Shape-preserving ConvNeXt V1 block: NCHW -> NCHW.
+
+    Adapted from Liu et al., A ConvNet for the 2020s (CVPR 2022),
+    sections 2.3-2.6 and 3.1: https://arxiv.org/abs/2201.03545
+    Official Block: https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py
+    Copyright (c) Meta Platforms, Inc. and affiliates. MIT notice in LICENSE-ConvNeXt.txt.
+    Sources checked 2026-10-23.
+
+    Adaptations: native nn.LayerNorm replaces the official channels-last wrapper.
+    torchvision StochasticDepth(mode="row") replaces timm DropPath, retaining
+    one residual-branch mask per sample and survival-probability scaling in train
+    mode, with no dropping in eval mode. No new timm dependency is required.
+    https://docs.pytorch.org/vision/0.24/generated/torchvision.ops.stochastic_depth.html
+    Layer scale is always learnable here, including when initialised to zero
+    (an identity block initially). The official implementation disables it at zero.
+
+    dim is the feature-channel count, not necessarily the three image channels.
+    Spatial downsampling and full-model weight initialisation belong to the later
+    model assembly. This standalone block uses PyTorch's default Conv/Linear init.
+    drop_path is in [0, 1], where 1 drops the entire branch during training.
+    """
+
+    def __init__(self, dim: int, drop_path: float = 0.0,
+                 layer_scale_init_value: float = 1e-6):
+        super().__init__()
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim < 1:
+            raise ValueError("dim must be a positive integer")
+        if not math.isfinite(drop_path) or not 0 <= drop_path <= 1:
+            raise ValueError("drop_path must be finite and in [0, 1]")
+        if not math.isfinite(layer_scale_init_value) or layer_scale_init_value < 0:
+            raise ValueError("layer_scale_init_value must be finite and nonnegative")
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, 4 * dim)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(torch.full((dim,), float(layer_scale_init_value)))
+        self.drop_path = StochasticDepth(float(drop_path), mode="row")
+
+    def forward(self, features):
+        residual = features
+        # NHWC makes LayerNorm and Linear operate only on channels at each pixel.
+        branch = self.dwconv(features).permute(0, 2, 3, 1)
+        branch = self.pwconv2(self.act(self.pwconv1(self.norm(branch))))
+        branch = (branch * self.gamma).permute(0, 3, 1, 2)
+        return residual + self.drop_path(branch)
 
 
 class SmallCNN(nn.Module):
