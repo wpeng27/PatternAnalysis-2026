@@ -18,6 +18,23 @@ from train import PREPROCESSING, evaluate, parse_args, prepare_run
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_amp_dtype_defaults_and_override(self):
+        self.assertEqual(parse_args(["--data-root", "fixture"]).amp_dtype, "float16")
+        self.assertEqual(parse_args(["--data-root", "fixture", "--amp-dtype", "bfloat16"]).amp_dtype, "bfloat16")
+        args = parse_args(["--mode", "evaluate", "--data-root", "fixture", "--checkpoint", "best.pt"])
+        self.assertIsNone(args.amp_dtype)
+
+    def test_drop_path_configuration_validation_and_evaluation_inheritance(self):
+        args = parse_args(["--model", "convnext_tiny", "--data-root", "fixture", "--drop-path-rate", "0.1"])
+        self.assertEqual(args.drop_path_rate, 0.1)
+        evaluation = parse_args(["--mode", "evaluate", "--model", "convnext_tiny",
+                                 "--data-root", "fixture", "--checkpoint", "best.pt"])
+        self.assertIsNone(evaluation.drop_path_rate)
+        for model, value in (("small_cnn", "0.1"), ("convnext_tiny", "nan"),
+                             ("convnext_tiny", "-0.1"), ("convnext_tiny", "1")):
+            with self.subTest(model=model, value=value), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(["--model", model, "--data-root", "fixture", "--drop-path-rate", value])
+
     def test_convnext_is_available_for_training_and_evaluation(self):
         train_args = parse_args(["--model", "convnext_tiny", "--data-root", "ADNI/AD_NC"])
         eval_args = parse_args(["--model", "convnext_tiny", "--data-root", "ADNI/AD_NC",

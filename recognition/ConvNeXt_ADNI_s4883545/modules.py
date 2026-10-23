@@ -175,9 +175,11 @@ class SmallCNN(nn.Module):
         return self.classifier(self.features(images))
 
 
-def build_model(name: str) -> nn.Module:
+def build_model(name: str, drop_path_rate: float = 0.0) -> nn.Module:
     if name == "small_cnn":
+        if drop_path_rate != 0:
+            raise ValueError("Stochastic depth is only supported by convnext_tiny")
         return SmallCNN()
     if name == "convnext_tiny":
-        return ConvNeXtTiny()
+        return ConvNeXtTiny(drop_path_rate=drop_path_rate)
     raise ValueError(f"Unknown model {name!r}. Choose from {MODEL_NAMES}.")

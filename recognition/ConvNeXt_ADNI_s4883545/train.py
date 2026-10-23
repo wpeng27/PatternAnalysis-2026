@@ -1,4 +1,4 @@
-"""Train a baseline or evaluate a saved checkpoint without retraining.
+"""Train either architecture or evaluate a saved checkpoint without retraining.
 
 Training validates after each epoch and never evaluates the test set.
 Checkpoint evaluation defaults to validation. Test evaluation must be selected
@@ -99,7 +99,7 @@ def seed_worker(worker_id: int) -> None:
 
 
 def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None,
-              patient_rows=None, include_predictions=False, log_file=None) -> dict:
+              patient_rows=None, include_predictions=False, log_file=None, amp_dtype=None) -> dict:
     """Sample-weighted loss and accuracy, including the final partial batch."""
     import torch
     from torch import nn
@@ -124,7 +124,7 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
             labels = labels.to(device, non_blocking=True)
             if training:
                 optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=device.type, enabled=amp):
+            with torch.autocast(device_type=device.type, enabled=amp, dtype=amp_dtype):
                 logits = model(images)
                 loss = criterion(logits, labels)
             if not torch.isfinite(loss):
@@ -134,8 +134,9 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
                 scaler.unscale_(optimizer)
                 # AMP can overflow while its dynamic scale is being adjusted.
                 # unscale_ records non-finite gradients, so scaler.step skips that
-                # update. Full-precision non-finite gradients remain a hard error.
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0, error_if_nonfinite=not amp)
+                # update. Without active scaling (FP32/BF16), non-finite gradients
+                # must fail before an optimizer update can corrupt the weights.
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0, error_if_nonfinite=not scaler.is_enabled())
                 previous_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
@@ -149,8 +150,10 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
             # Column 1 is AD. Never pass predicted classes or P(NC) to AD AUROC.
             all_probabilities.extend(logits.detach().float().softmax(dim=1)[:, CLASS_TO_INDEX["AD"]].cpu().tolist())
             if step == 1 or step % 50 == 0 or step == len(loader):
+                updates = (f", optimizer_steps={step - skipped_updates}, amp_skipped={skipped_updates}"
+                           if training else "")
                 emit(f"{phase} batch {step}/{len(loader)}: loss={total_loss / samples:.4f}, "
-                     f"slice_accuracy={correct / samples:.4f}", log_file)
+                     f"slice_accuracy={correct / samples:.4f}{updates}", log_file)
     if device.type == "cuda":
         torch.cuda.synchronize()
     if samples == 0:
@@ -231,10 +234,14 @@ def train(args) -> None:
             or not torch.isfinite(image).all() or image.min() < 0 or image.max() > 1):
         raise RuntimeError("Image preprocessing preflight failed")
     print(f"Image preflight: {tuple(image.shape)}, {image.dtype}, identical grayscale channels", flush=True)
-    model = build_model(args.model).to(device)
+    model_kwargs = {"drop_path_rate": args.drop_path_rate}
+    model = build_model(args.model, **model_kwargs).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     amp = (args.amp is not False) and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    amp_dtype = getattr(torch, args.amp_dtype)
+    if amp and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        raise ValueError("This CUDA device does not support bfloat16 AMP")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp and amp_dtype == torch.float16)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience,
         threshold=args.min_delta, threshold_mode="abs", min_lr=1e-6)
@@ -252,12 +259,23 @@ def train(args) -> None:
                                 ("torch", "torchvision", "Pillow", "numpy", "scikit-learn", "matplotlib")},
                    "source_sha256": {p.name: sha256(p.read_bytes()) for p in Path(__file__).parent.glob("*.py")}})
     config.update({"checkpoint_version": 2, "selection_rule": SELECTION_RULE,
+                   "model_kwargs": model_kwargs,
+                   "optimizer_settings": {"name": "AdamW", "lr": args.lr,
+                                          "weight_decay": args.weight_decay, "betas": [0.9, 0.999],
+                                          "eps": 1e-8, "parameter_groups": "All parameters, including biases and normalization"},
+                   "scheduler_settings": {"name": "ReduceLROnPlateau", "metric": "val.loss", "mode": "min",
+                                          "factor": args.lr_factor, "patience": args.lr_patience,
+                                          "threshold": args.min_delta, "threshold_mode": "abs", "min_lr": 1e-6},
+                   "regularization_settings": {"weight_decay": args.weight_decay, "drop_path_rate": args.drop_path_rate,
+                                               "classifier_dropout": 0.2 if args.model == "small_cnn" else 0.0,
+                                               "label_smoothing": 0.0, "augmentation": "none", "gradient_clip_norm": 5.0},
                    "model_settings": {"architecture": str(model), "input_shape": [3, IMAGE_SIZE, IMAGE_SIZE], "num_classes": 2},
                    "selection_metric": "val.loss", "selection_unit": "slice",
                    "early_stopping_patience": args.patience, "early_stopping_min_delta": args.min_delta,
                    "scheduler": "ReduceLROnPlateau on validation slice cross-entropy",
                    "scheduler_factor": args.lr_factor, "scheduler_patience": args.lr_patience,
-                   "precision": "CUDA float16 autocast with GradScaler" if amp else "float32",
+                   "precision": ("CUDA float16 autocast with GradScaler" if args.amp_dtype == "float16"
+                                 else "CUDA bfloat16 autocast without gradient scaling") if amp else "float32",
                    "device_type": device.type, "command": [sys.executable, *sys.argv], "pid": os.getpid(),
                    "created_utc": datetime.now(timezone.utc).isoformat(),
                    "patient_metrics_basis": "Mean P(AD) with manifest label consistency verified",
@@ -272,6 +290,10 @@ def train(args) -> None:
         if saved.get("checkpoint_version") != 2:
             raise ValueError("This checkpoint lacks complete resume state. Old checkpoints remain evaluation-only.")
         previous = saved["config"]
+        if previous.get("amp_dtype", "float16") != args.amp_dtype:
+            raise ValueError("Resume setting differs from the original run: amp_dtype")
+        if previous.get("model_kwargs", {"drop_path_rate": 0.0}) != model_kwargs:
+            raise ValueError("Resume setting differs from the original run: model_kwargs")
         required_same = ("model", "batch_size", "lr", "weight_decay", "seed", "workers", "threads",
                          "effective_amp", "class_to_index", "preprocessing", "split_sha256", "device_type", "model_settings",
                          "device_name", "packages", "selection_rule", "early_stopping_patience",
@@ -317,11 +339,12 @@ def train(args) -> None:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
-            training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp, log_file=log_file)
+            training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp, log_file=log_file,
+                                 amp_dtype=amp_dtype)
             allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
             reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
             validation = run_epoch(model, loaders["val"], device, amp=amp,
-                                   patient_rows=splits["val"], log_file=log_file)
+                                   patient_rows=splits["val"], log_file=log_file, amp_dtype=amp_dtype)
             scheduler.step(validation["loss"])
             improved = update_selection(selection, validation["loss"], epoch, args.patience, args.min_delta)
             record = {"epoch": epoch, "train": training, "val": validation,
@@ -382,18 +405,28 @@ def evaluate(args) -> dict:
         raise ValueError("Checkpoint class encoding or preprocessing does not match this loader")
     if config.get("split_sha256") != audit["split_sha256"]:
         raise ValueError("Saved splits do not match the checkpoint's original split hashes")
-    model = build_model(args.model).to(device)
+    model_kwargs = config.get("model_kwargs", {"drop_path_rate": 0.0})
+    if args.drop_path_rate is not None and args.drop_path_rate != model_kwargs["drop_path_rate"]:
+        raise ValueError("Evaluation drop-path rate must match the checkpoint configuration")
+    model = build_model(args.model, **model_kwargs).to(device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     loader = make_loader(args, splits[args.eval_split], device)
     requested_amp = config.get("effective_amp", False) if args.amp is None else args.amp
     amp = requested_amp and device.type == "cuda"
+    amp_dtype_name = args.amp_dtype or config.get("amp_dtype", "float16")
+    amp_dtype = getattr(torch, amp_dtype_name)
+    if amp and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        raise ValueError("This CUDA device does not support bfloat16 AMP")
     metrics = run_epoch(model, loader, device, amp=amp, phase=args.eval_split,
-                        patient_rows=splits[args.eval_split], include_predictions=args.save_predictions)
+                        patient_rows=splits[args.eval_split], include_predictions=args.save_predictions,
+                        amp_dtype=amp_dtype)
     predictions = metrics.pop("predictions", None)
     result = {"mode": "evaluate", "model": args.model, "split": args.eval_split,
               "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": sha256(raw),
               "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
+              "model_kwargs": model_kwargs,
               "device": str(device), "batch_size": args.batch_size, "effective_amp": amp,
+              "amp_dtype": amp_dtype_name,
               "seed": args.seed, "python": platform.python_version(), "torch": str(torch.__version__),
               "pytorch_cuda": torch.version.cuda, "metrics": metrics, "retrained": False}
     args.output.mkdir(parents=True, exist_ok=False)
@@ -430,16 +463,29 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=32, help="Training/evaluation batch size")
     parser.add_argument("--lr", "--learning-rate", dest="lr", type=float, default=1e-3, help="AdamW learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
+    parser.add_argument("--drop-path-rate", type=float, default=None,
+                        help="ConvNeXt maximum stochastic-depth probability (train default 0, evaluate inherits checkpoint)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed, must match split seed when training")
     parser.add_argument("--workers", type=int, default=2, help="DataLoader workers, zero disables subprocesses")
     parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU threads")
     parser.add_argument("--device", default="cuda", help="cpu, cuda or cuda:N")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None,
                         help="Mixed precision on CUDA (default: on in training, checkpoint setting in evaluation)")
+    parser.add_argument("--amp-dtype", choices=("float16", "bfloat16"), default=None,
+                        help="Autocast dtype (train default float16, evaluation inherits checkpoint)")
     parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint, required in evaluate mode")
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
     parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
+    if args.mode == "train" and args.amp_dtype is None:
+        args.amp_dtype = "float16"
+    if args.mode == "train" and args.drop_path_rate is None:
+        args.drop_path_rate = 0.0
+    if args.drop_path_rate is not None:
+        if not math.isfinite(args.drop_path_rate) or not 0 <= args.drop_path_rate < 1:
+            parser.error("Drop-path rate must be finite and in [0, 1)")
+        if args.model == "small_cnn" and args.drop_path_rate != 0:
+            parser.error("Nonzero --drop-path-rate requires --model convnext_tiny")
     if args.epochs < 1 or args.batch_size < 1 or args.threads < 1 or args.workers < 0:
         parser.error("Epochs, batch size and threads must be positive, workers nonnegative")
     if not math.isfinite(args.lr) or args.lr <= 0 or not math.isfinite(args.weight_decay) or args.weight_decay < 0:

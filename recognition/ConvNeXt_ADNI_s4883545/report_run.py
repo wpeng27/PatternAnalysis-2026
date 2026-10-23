@@ -108,7 +108,7 @@ def final_report(run, evaluation_path):
         raise ValueError("Validation result is not from this unchanged best checkpoint")
     if abs(evaluation["metrics"]["loss"] - selected["val"]["loss"]) > 1e-6:
         raise ValueError("Reloaded validation loss does not reproduce the selected epoch")
-    model = build_model(best["model_name"])
+    model = build_model(best["model_name"], **best["config"].get("model_kwargs", {}))
     model.load_state_dict(best["model_state_dict"], strict=True)
     if not all(torch.isfinite(value).all() for value in model.state_dict().values()):
         raise ValueError("Checkpoint contains non-finite model state")
@@ -124,7 +124,7 @@ def final_report(run, evaluation_path):
         if key != "loss":
             axis.set_ylim(0, 1.02)
         axis.legend(fontsize=8)
-    figure.suptitle(f"Small CNN baseline | selected epoch {best['epoch']} by validation loss")
+    figure.suptitle(f"{best['model_name']} | selected epoch {best['epoch']} by validation loss")
     figure.savefig(run / "learning_curves.png", dpi=160)
     plt.close(figure)
     segments = segment_lineage(run)

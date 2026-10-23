@@ -15,3 +15,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 /tmp/
+# Local ConvNeXt launcher and experiment notes
+/recognition/ConvNeXt_ADNI_s4883545/launch_convnext.ps1
+/recognition/ConvNeXt_ADNI_s4883545/CONVNEXT_RUN.md

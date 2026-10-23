@@ -135,6 +135,21 @@ class DatasetTests(unittest.TestCase):
 
 
 class TrainingTests(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available() and torch.cuda.is_bf16_supported(), "BF16 CUDA required")
+    def test_bfloat16_without_scaler_rejects_nonfinite_gradients(self):
+        model = torch.nn.Linear(4, 2).cuda()
+        initial = {name: p.detach().clone() for name, p in model.named_parameters()}
+        loader = DataLoader(TensorDataset(torch.ones(2, 4), torch.tensor([0, 1])), batch_size=2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scaler = torch.amp.GradScaler("cuda", enabled=False)
+        hook = model.weight.register_hook(lambda grad: torch.full_like(grad, float("inf")))
+        try:
+            with self.assertRaises(RuntimeError):
+                run_epoch(model, loader, torch.device("cuda"), optimizer, scaler, amp=True, amp_dtype=torch.bfloat16)
+        finally:
+            hook.remove()
+        self.assertTrue(all(torch.equal(initial[name], p) for name, p in model.named_parameters()))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the AMP overflow test")
     def test_amp_overflow_skips_update_without_corrupting_weights(self):
         seed_everything(42)
