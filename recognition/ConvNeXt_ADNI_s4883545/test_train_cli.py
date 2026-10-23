@@ -14,10 +14,16 @@ import torch
 
 from dataset import CLASS_TO_INDEX, audit_and_split, load_splits, save_splits
 from modules import build_model
-from train import PREPROCESSING, evaluate, parse_args, prepare_run
+from train import PREPROCESSING, PREPROCESSING_BY_SCALING, evaluate, parse_args, prepare_run
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_input_scaling_defaults_and_override(self):
+        self.assertEqual(parse_args(["--data-root", "fixture"]).input_scaling, "unit")
+        self.assertEqual(parse_args(["--data-root", "fixture", "--input-scaling", "centered"]).input_scaling, "centered")
+        args = parse_args(["--mode", "evaluate", "--data-root", "fixture", "--checkpoint", "best.pt"])
+        self.assertIsNone(args.input_scaling)
+
     def test_amp_dtype_defaults_and_override(self):
         self.assertEqual(parse_args(["--data-root", "fixture"]).amp_dtype, "float16")
         self.assertEqual(parse_args(["--data-root", "fixture", "--amp-dtype", "bfloat16"]).amp_dtype, "bfloat16")
@@ -138,6 +144,21 @@ class EvaluationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     evaluate(args)
                 self.assertFalse(args.output.exists())
+
+    def test_centered_checkpoint_inherits_scaling_and_rejects_override(self):
+        self.saved["config"].update(input_scaling="centered", preprocessing=PREPROCESSING_BY_SCALING["centered"])
+        torch.save(self.saved, self.checkpoint)
+        bad = self.args()
+        bad.input_scaling = "unit"
+        with self.assertRaisesRegex(ValueError, "input scaling"):
+            evaluate(bad)
+        self.assertFalse(bad.output.exists())
+        args = self.args()
+        with redirect_stdout(io.StringIO()):
+            result = evaluate(args)
+        self.assertEqual(result["input_scaling"], "centered")
+        self.assertEqual(result["preprocessing"], PREPROCESSING_BY_SCALING["centered"])
+        self.assertFalse(result["retrained"])
 
     def test_cuda_alias_resolves_to_an_explicit_device_index(self):
         args = self.args()

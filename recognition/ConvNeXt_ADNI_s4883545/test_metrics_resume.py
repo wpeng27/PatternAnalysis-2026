@@ -80,15 +80,23 @@ class ResumeTests(unittest.TestCase):
         rows, report = audit_and_split(self.root)
         save_splits(self.splits, rows, report)
 
-    def run_training(self, name, epochs, resume=None):
+    def run_training(self, name, epochs, resume=None, input_scaling="unit"):
         options = ["--data-root", str(self.root), "--splits", str(self.splits), "--output", str(self.base / name),
                    "--device", "cpu", "--workers", "0", "--threads", "2", "--batch-size", "2",
-                   "--epochs", str(epochs), "--lr-patience", "0", "--no-amp"]
+                   "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling]
         if resume is not None:
             options.extend(["--resume", str(resume)])
         with redirect_stdout(io.StringIO()):
             train(parse_args(options))
         return torch.load(self.base / name / "last.pt", map_location="cpu", weights_only=True)
+
+    def test_centered_training_records_preprocessing_and_rejects_wrong_resume(self):
+        saved = self.run_training("centered", 1, input_scaling="centered")
+        self.assertEqual(saved["config"]["input_scaling"], "centered")
+        self.assertIn("2*x-1", saved["config"]["preprocessing"])
+        with self.assertRaisesRegex(ValueError, "preprocessing"):
+            self.run_training("wrong_scaling", 2, self.base / "centered/last.pt")
+        self.assertFalse((self.base / "wrong_scaling").exists())
 
     def assert_nested_equal(self, left, right):
         if isinstance(left, torch.Tensor):

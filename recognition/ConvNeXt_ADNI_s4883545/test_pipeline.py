@@ -38,6 +38,20 @@ class DatasetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 patient_and_slice(name)
 
+    def test_centered_scaling_is_exact_and_preserves_labels_and_channels(self):
+        rows, report = audit_and_split(self.root)
+        self.assertTrue(report["passed"])
+        unit = ADNIDataset(self.root, rows)
+        centered = ADNIDataset(self.root, rows, input_scaling="centered")
+        for index in (0, len(rows) - 1):
+            image, label = unit[index]
+            changed, changed_label = centered[index]
+            self.assertEqual(label, changed_label)
+            self.assertTrue(torch.equal(changed, image * 2 - 1))
+            self.assertTrue(torch.equal(changed[0], changed[1]) and torch.equal(changed[1], changed[2]))
+            self.assertGreaterEqual(changed.min().item(), -1)
+            self.assertLessEqual(changed.max().item(), 1)
+
     def test_split_reproducibility_and_loader(self):
         rows, report = audit_and_split(self.root)
         self.assertTrue(report["passed"], report["issues"])

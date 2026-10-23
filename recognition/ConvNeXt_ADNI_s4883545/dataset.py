@@ -244,13 +244,16 @@ def load_splits(directory: Path) -> tuple[dict[str, list[dict]], dict]:
 class ADNIDataset(Dataset):
     """Float32 CHW tensors, bilinear 224x224 resize and three identical channels.
 
-    Fixed [0, 1] scaling uses no validation/test statistics. No augmentation in
-    this baseline. Recheck file hashes to reject data changed since the audit.
+    Fixed unit [0, 1] or centered [-1, 1] scaling uses no dataset statistics.
+    No augmentation. Recheck hashes to reject data changed since the audit.
     """
 
-    def __init__(self, root: Path, rows: list[dict]):
+    def __init__(self, root: Path, rows: list[dict], input_scaling: str = "unit"):
+        if input_scaling not in {"unit", "centered"}:
+            raise ValueError("input_scaling must be unit or centered")
         self.root = root.resolve(strict=True)
         self.rows = rows
+        self.input_scaling = input_scaling
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -266,6 +269,8 @@ class ADNIDataset(Dataset):
         with Image.open(io.BytesIO(raw)) as image:
             gray = image.convert("L").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BILINEAR)
             tensor = TF.pil_to_tensor(gray).to(dtype=torch.float32).div_(255.0)
+        if self.input_scaling == "centered":
+            tensor = tensor.mul(2).sub(1)
         return tensor.repeat(3, 1, 1), int(row["label"])
 
 

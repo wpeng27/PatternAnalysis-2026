@@ -36,6 +36,10 @@ else:
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 
 PREPROCESSING = "Pillow L, bilinear 224x224, float32 /255, repeat three channels"
+PREPROCESSING_BY_SCALING = {
+    "unit": PREPROCESSING,
+    "centered": "Pillow L, bilinear 224x224, float32 /255 then 2*x-1, repeat three channels",
+}
 
 
 def emit(message, log_file=None):
@@ -206,7 +210,7 @@ def make_loader(args, rows, device, training=False):
     from torch.utils.data import DataLoader
 
     return DataLoader(
-        ADNIDataset(args.data_root, rows), batch_size=args.batch_size,
+        ADNIDataset(args.data_root, rows, input_scaling=args.input_scaling), batch_size=args.batch_size,
         shuffle=training, num_workers=args.workers,
         pin_memory=(device.type == "cuda"), drop_last=False,
         worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed),
@@ -231,9 +235,11 @@ def train(args) -> None:
     image, label = loaders["train"].dataset[0]
     if (image.shape != (3, IMAGE_SIZE, IMAGE_SIZE) or image.dtype != torch.float32
             or not torch.equal(image[0], image[1]) or not torch.equal(image[1], image[2])
-            or not torch.isfinite(image).all() or image.min() < 0 or image.max() > 1):
+            or not torch.isfinite(image).all()
+            or image.min() < (-1 if args.input_scaling == "centered" else 0) or image.max() > 1):
         raise RuntimeError("Image preprocessing preflight failed")
-    print(f"Image preflight: {tuple(image.shape)}, {image.dtype}, identical grayscale channels", flush=True)
+    print(f"Image preflight: {tuple(image.shape)}, {image.dtype}, identical grayscale channels, "
+          f"input_scaling={args.input_scaling}", flush=True)
     model_kwargs = {"drop_path_rate": args.drop_path_rate}
     model = build_model(args.model, **model_kwargs).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -249,7 +255,7 @@ def train(args) -> None:
     config.update({"model": args.model, "pretrained": False, "effective_amp": amp,
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
                    "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
-                   "preprocessing": PREPROCESSING,
+                   "preprocessing": PREPROCESSING_BY_SCALING[args.input_scaling],
                    "augmentation": "none", "deterministic_algorithms": True,
                    "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
                    "split_sha256": audit["split_sha256"], "python": platform.python_version(),
@@ -401,7 +407,14 @@ def evaluate(args) -> dict:
     config = checkpoint.get("config", {})
     if checkpoint.get("model_name") != args.model:
         raise ValueError("Selected --model does not match the checkpoint model")
-    if config.get("class_to_index") != CLASS_TO_INDEX or config.get("preprocessing") != PREPROCESSING:
+    saved_scaling = config.get("input_scaling", "unit")
+    if saved_scaling not in PREPROCESSING_BY_SCALING:
+        raise ValueError("Unsupported checkpoint input scaling")
+    if args.input_scaling is not None and args.input_scaling != saved_scaling:
+        raise ValueError("Evaluation input scaling must match the checkpoint configuration")
+    args.input_scaling = saved_scaling
+    if (config.get("class_to_index") != CLASS_TO_INDEX
+            or config.get("preprocessing") != PREPROCESSING_BY_SCALING[saved_scaling]):
         raise ValueError("Checkpoint class encoding or preprocessing does not match this loader")
     if config.get("split_sha256") != audit["split_sha256"]:
         raise ValueError("Saved splits do not match the checkpoint's original split hashes")
@@ -425,6 +438,7 @@ def evaluate(args) -> dict:
               "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": sha256(raw),
               "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
               "model_kwargs": model_kwargs,
+              "input_scaling": saved_scaling, "preprocessing": config["preprocessing"],
               "device": str(device), "batch_size": args.batch_size, "effective_amp": amp,
               "amp_dtype": amp_dtype_name,
               "seed": args.seed, "python": platform.python_version(), "torch": str(torch.__version__),
@@ -465,6 +479,8 @@ def parse_args(argv=None):
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
     parser.add_argument("--drop-path-rate", type=float, default=None,
                         help="ConvNeXt maximum stochastic-depth probability (train default 0, evaluate inherits checkpoint)")
+    parser.add_argument("--input-scaling", choices=("unit", "centered"), default=None,
+                        help="unit=[0,1], centered=2*x-1 (train default unit, evaluation inherits checkpoint)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed, must match split seed when training")
     parser.add_argument("--workers", type=int, default=2, help="DataLoader workers, zero disables subprocesses")
     parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU threads")
@@ -477,6 +493,8 @@ def parse_args(argv=None):
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
     parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
+    if args.mode == "train" and args.input_scaling is None:
+        args.input_scaling = "unit"
     if args.mode == "train" and args.amp_dtype is None:
         args.amp_dtype = "float16"
     if args.mode == "train" and args.drop_path_rate is None:
