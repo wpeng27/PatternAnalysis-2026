@@ -13,7 +13,12 @@ import os
 from pathlib import Path
 import platform
 import random
+import shutil
+import sys
 import time
+from datetime import datetime, timezone
+
+PROCESS_STARTED = time.perf_counter()
 
 # Required by CUDA's deterministic matrix operations. Set before CUDA initialises.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -22,11 +27,22 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 if __package__:
     from .dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
     from .modules import build_model
+    from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
+    from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 else:
     from dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
     from modules import build_model
+    from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
+    from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 
 PREPROCESSING = "Pillow L, bilinear 224x224, float32 /255, repeat three channels"
+
+
+def emit(message, log_file=None):
+    print(message, flush=True)
+    if log_file is not None:
+        with Path(log_file).open("a", encoding="utf-8") as stream:
+            stream.write(str(message) + "\n")
 
 
 def check_environment() -> dict:
@@ -82,7 +98,8 @@ def seed_worker(worker_id: int) -> None:
     np.random.seed(seed)
 
 
-def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None) -> dict:
+def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None,
+              patient_rows=None, include_predictions=False, log_file=None) -> dict:
     """Sample-weighted loss and accuracy, including the final partial batch."""
     import torch
     from torch import nn
@@ -92,6 +109,11 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
     model.train(training)
     criterion = nn.CrossEntropyLoss()
     total_loss, correct, samples, skipped_updates = 0.0, 0, 0, 0
+    all_labels, all_probabilities = [], []
+    if patient_rows is not None:
+        from torch.utils.data import SequentialSampler
+        if training or not isinstance(loader.sampler, SequentialSampler):
+            raise ValueError("Patient aggregation requires an ordered, non-training loader")
     if device.type == "cuda":
         torch.cuda.synchronize()
     start = time.perf_counter()
@@ -123,18 +145,27 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
             samples += count
             total_loss += loss.item() * count
             correct += (logits.argmax(dim=1) == labels).sum().item()
+            all_labels.extend(labels.detach().cpu().tolist())
+            # Column 1 is AD. Never pass predicted classes or P(NC) to AD AUROC.
+            all_probabilities.extend(logits.detach().float().softmax(dim=1)[:, CLASS_TO_INDEX["AD"]].cpu().tolist())
             if step == 1 or step % 50 == 0 or step == len(loader):
-                print(f"{phase} batch {step}/{len(loader)}: loss={total_loss / samples:.4f}, "
-                      f"slice_accuracy={correct / samples:.4f}", flush=True)
+                emit(f"{phase} batch {step}/{len(loader)}: loss={total_loss / samples:.4f}, "
+                     f"slice_accuracy={correct / samples:.4f}", log_file)
     if device.type == "cuda":
         torch.cuda.synchronize()
     if samples == 0:
         raise ValueError("Cannot train or evaluate an empty loader")
-    result = {"loss": total_loss / samples, "slice_accuracy": correct / samples,
-              "samples": samples, "seconds": time.perf_counter() - start}
+    result = classification_metrics(all_labels, all_probabilities, loss=total_loss / samples)
+    result["slice_accuracy"] = result["accuracy"]  # Backward-compatible, explicit unit.
+    if patient_rows is not None:
+        result["patient"] = aggregate_patients(patient_rows, all_labels, all_probabilities)
+    if include_predictions:
+        result["predictions"] = {"labels": all_labels, "p_ad": all_probabilities}
+    result["seconds"] = time.perf_counter() - start
     if training:
         result.update({"optimizer_steps": len(loader) - skipped_updates,
-                       "amp_skipped_updates": skipped_updates})
+                       "amp_skipped_updates": skipped_updates,
+                       "measurement_note": "Online training metrics across changing weights and active dropout"})
     return result
 
 
@@ -176,7 +207,9 @@ def make_loader(args, rows, device, training=False):
         shuffle=training, num_workers=args.workers,
         pin_memory=(device.type == "cuda"), drop_last=False,
         worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed),
-        persistent_workers=(args.workers > 0),
+        # Restart workers at each epoch boundary so their seeding can be restored
+        # from generator state during resume. Dataset transforms are deterministic.
+        persistent_workers=False,
     )
 
 
@@ -184,6 +217,7 @@ def train(args) -> None:
     import importlib.metadata
     import torch
 
+    segment_started = time.perf_counter()
     device = prepare_run(args)
     splits, audit = load_splits(args.splits)
     if audit["seed"] != args.seed:
@@ -201,6 +235,9 @@ def train(args) -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     amp = (args.amp is not False) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience,
+        threshold=args.min_delta, threshold_mode="abs", min_lr=1e-6)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config.update({"model": args.model, "pretrained": False, "effective_amp": amp,
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
@@ -213,33 +250,116 @@ def train(args) -> None:
                    "packages": {name: importlib.metadata.version(name) for name in
                                 ("torch", "torchvision", "Pillow", "numpy", "scikit-learn", "matplotlib")},
                    "source_sha256": {p.name: sha256(p.read_bytes()) for p in Path(__file__).parent.glob("*.py")}})
-    args.output.mkdir(parents=True, exist_ok=False)
-    (args.output / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    config.update({"checkpoint_version": 2, "selection_rule": SELECTION_RULE,
+                   "model_settings": {"architecture": str(model), "input_shape": [3, IMAGE_SIZE, IMAGE_SIZE], "num_classes": 2},
+                   "selection_metric": "val.loss", "selection_unit": "slice",
+                   "early_stopping_patience": args.patience, "early_stopping_min_delta": args.min_delta,
+                   "scheduler": "ReduceLROnPlateau on validation slice cross-entropy",
+                   "scheduler_factor": args.lr_factor, "scheduler_patience": args.lr_patience,
+                   "precision": "CUDA float16 autocast with GradScaler" if amp else "float32",
+                   "device_type": device.type, "command": [sys.executable, *sys.argv], "pid": os.getpid(),
+                   "created_utc": datetime.now(timezone.utc).isoformat(),
+                   "patient_metrics_basis": "Mean P(AD) with manifest label consistency verified",
+                   "timing_definition": "Epoch seconds include training, validation and metrics, exclude checkpoint disk writes",
+                   "memory_definition": "Peak PyTorch allocated/reserved bytes across full training forward/backward/optimizer steps"})
     history = []
-    best_loss = float("inf")
-    for epoch in range(1, args.epochs + 1):
-        print(f"Epoch {epoch}/{args.epochs}", flush=True)
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
-        training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp)
-        # Capture training peaks before validation. These are PyTorch allocator peaks,
-        # not whole-system GPU memory or an estimate of other models' requirements.
-        allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
-        reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
-        validation = run_epoch(model, loaders["val"], device, amp=amp)
-        record = {"epoch": epoch, "train": training, "val": validation,
-                  "peak_training_allocated_bytes": allocated, "peak_training_reserved_bytes": reserved}
-        history.append(record)
-        checkpoint = {"model_name": args.model, "epoch": epoch,
-                      "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
-                      "scaler_state_dict": scaler.state_dict(), "config": config, "history": history}
-        torch.save(checkpoint, args.output / "last.pt")
-        if validation["loss"] < best_loss:
-            best_loss = validation["loss"]
-            torch.save(checkpoint, args.output / "best.pt")
-        (args.output / "history.json").write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps(record, indent=2), flush=True)
-    print(f"Completed. Artifacts: {args.output}. Test set was not evaluated.", flush=True)
+    selection = {"best_loss": None, "best_epoch": None, "bad_epochs": 0, "stopped": False}
+    start_epoch = 1
+    best_source = None
+    if args.resume is not None:
+        saved = torch.load(args.resume, map_location="cpu", weights_only=True)
+        if saved.get("checkpoint_version") != 2:
+            raise ValueError("This checkpoint lacks complete resume state. Old checkpoints remain evaluation-only.")
+        previous = saved["config"]
+        required_same = ("model", "batch_size", "lr", "weight_decay", "seed", "workers", "threads",
+                         "effective_amp", "class_to_index", "preprocessing", "split_sha256", "device_type", "model_settings",
+                         "device_name", "packages", "selection_rule", "early_stopping_patience",
+                         "early_stopping_min_delta", "scheduler_factor", "scheduler_patience")
+        for key in required_same:
+            if previous.get(key) != config.get(key):
+                raise ValueError(f"Resume setting differs from the original run: {key}")
+        selection = dict(saved["selection_state"])
+        if selection["stopped"]:
+            raise ValueError("This run already met its predefined early-stopping rule")
+        start_epoch = saved["epoch"] + 1
+        if args.epochs < start_epoch:
+            raise ValueError("--epochs is the total target and must exceed the resumed epoch")
+        best_source = args.resume.parent / "best.pt"
+        if not best_source.is_file() or sha256(best_source.read_bytes()) != saved["best_checkpoint_sha256"]:
+            raise ValueError("Resume requires the unchanged companion best.pt beside last.pt")
+        model.load_state_dict(saved["model_state_dict"])
+        optimizer.load_state_dict(saved["optimizer_state_dict"])
+        scheduler.load_state_dict(saved["scheduler_state_dict"])
+        scaler.load_state_dict(saved["scaler_state_dict"])
+        history = list(saved["history"])
+        restore_random_state(saved["random_state"], loaders)
+        config["resumed_from"] = {"path": str(args.resume.resolve()), "epoch": saved["epoch"],
+                                  "sha256": sha256(args.resume.read_bytes())}
+    args.output.mkdir(parents=True, exist_ok=False)
+    if best_source is not None:
+        shutil.copy2(best_source, args.output / "best.pt")
+    write_json(args.output / "config.json", config)
+    log_file = args.output / "training.log"
+    emit(f"PID {os.getpid()}. {SELECTION_RULE}. NC=0, AD=1. Test set closed.", log_file)
+    startup_seconds = time.perf_counter() - segment_started
+    process_startup_seconds = time.perf_counter() - PROCESS_STARTED
+    status = {"state": "running", "pid": os.getpid(), "start_epoch": start_epoch,
+              "target_epochs": args.epochs, "last_completed_epoch": start_epoch - 1,
+              "startup_seconds": startup_seconds, "process_startup_seconds": process_startup_seconds,
+              "started_utc": datetime.now(timezone.utc).isoformat()}
+    write_json(args.output / "status.json", status)
+    try:
+        for epoch in range(start_epoch, args.epochs + 1):
+            emit(f"Epoch {epoch}/{args.epochs}", log_file)
+            epoch_started = time.perf_counter()
+            current_lr = optimizer.param_groups[0]["lr"]
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+                torch.cuda.reset_peak_memory_stats(device)
+            training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp, log_file=log_file)
+            allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
+            reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
+            validation = run_epoch(model, loaders["val"], device, amp=amp,
+                                   patient_rows=splits["val"], log_file=log_file)
+            scheduler.step(validation["loss"])
+            improved = update_selection(selection, validation["loss"], epoch, args.patience, args.min_delta)
+            record = {"epoch": epoch, "train": training, "val": validation,
+                      "learning_rate": current_lr, "next_learning_rate": optimizer.param_groups[0]["lr"],
+                      "epoch_seconds": time.perf_counter() - epoch_started,
+                      "peak_training_allocated_bytes": allocated, "peak_training_reserved_bytes": reserved,
+                      "selected_as_best": improved, "bad_epochs": selection["bad_epochs"]}
+            history.append(record)
+            checkpoint = {"checkpoint_version": 2, "model_name": args.model, "epoch": epoch,
+                          "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
+                          "scheduler_state_dict": scheduler.state_dict(), "scaler_state_dict": scaler.state_dict(),
+                          "random_state": capture_random_state(loaders), "selection_state": dict(selection),
+                          "config": config, "history": history}
+            if improved:
+                save_checkpoint(args.output / "best.pt", checkpoint)
+            checkpoint["best_checkpoint_sha256"] = sha256((args.output / "best.pt").read_bytes())
+            save_checkpoint(args.output / "last.pt", checkpoint)
+            write_json(args.output / "history.json", history)
+            status.update(last_completed_epoch=epoch, best_epoch=selection["best_epoch"],
+                          segment_seconds=time.perf_counter() - segment_started)
+            write_json(args.output / "status.json", status)
+            emit(f"Epoch {epoch} done: train_loss={training['loss']:.5f}, val_loss={validation['loss']:.5f}, "
+                 f"val_slice_accuracy={validation['accuracy']:.4f}, val_AD_AUROC={validation['ad_auroc']:.4f}, "
+                 f"seconds={record['epoch_seconds']:.2f}, best_epoch={selection['best_epoch']}", log_file)
+            if selection["stopped"]:
+                break
+        status.update(state="completed", stop_reason="early_stopping" if selection["stopped"] else "epoch_limit",
+                      completed_utc=datetime.now(timezone.utc).isoformat(),
+                      segment_seconds=time.perf_counter() - segment_started,
+                      process_seconds=time.perf_counter() - PROCESS_STARTED,
+                      test_evaluated=False)
+        write_json(args.output / "status.json", status)
+        emit(f"Completed: {status['stop_reason']}. Best epoch {selection['best_epoch']}. Artifacts: {args.output}", log_file)
+    except BaseException as error:
+        status.update(state="failed", error=f"{type(error).__name__}: {error}",
+                      segment_seconds=time.perf_counter() - segment_started)
+        write_json(args.output / "status.json", status)
+        emit(status["error"], log_file)
+        raise
 
 
 def evaluate(args) -> dict:
@@ -266,7 +386,9 @@ def evaluate(args) -> dict:
     loader = make_loader(args, splits[args.eval_split], device)
     requested_amp = config.get("effective_amp", False) if args.amp is None else args.amp
     amp = requested_amp and device.type == "cuda"
-    metrics = run_epoch(model, loader, device, amp=amp, phase=args.eval_split)
+    metrics = run_epoch(model, loader, device, amp=amp, phase=args.eval_split,
+                        patient_rows=splits[args.eval_split], include_predictions=args.save_predictions)
+    predictions = metrics.pop("predictions", None)
     result = {"mode": "evaluate", "model": args.model, "split": args.eval_split,
               "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": sha256(raw),
               "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
@@ -275,6 +397,15 @@ def evaluate(args) -> dict:
               "pytorch_cuda": torch.version.cuda, "metrics": metrics, "retrained": False}
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if predictions is not None:
+        import csv
+        with (args.output / "predictions.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=("path", "patient_id", "label", "p_ad", "predicted", "confidence"))
+            writer.writeheader()
+            for row, label, probability in zip(splits[args.eval_split], predictions["labels"], predictions["p_ad"]):
+                writer.writerow({"path": row["path"], "patient_id": row["patient_id"], "label": label,
+                                 "p_ad": probability, "predicted": int(probability > 0.5),
+                                 "confidence": max(probability, 1 - probability)})
     print(json.dumps(result, indent=2), flush=True)
     return result
 
@@ -290,7 +421,12 @@ def parse_args(argv=None):
                         help="Existing audited split lists, reused without resplitting")
     parser.add_argument("--output", "--output-dir", dest="output", type=Path,
                         help="New output directory (default: artifacts/runs/<model>_<mode>)")
-    parser.add_argument("--epochs", type=int, default=1, help="Training epochs")
+    parser.add_argument("--epochs", type=int, default=1, help="Total epoch target, including previously completed epochs on resume")
+    parser.add_argument("--resume", type=Path, help="Version-2 last.pt with companion best.pt, resume at next epoch into a new output")
+    parser.add_argument("--patience", type=int, default=5, help="Early stop after this many non-improving validation losses")
+    parser.add_argument("--min-delta", type=float, default=0.0, help="Required absolute validation-loss decrease for selection")
+    parser.add_argument("--lr-patience", type=int, default=2, help="ReduceLROnPlateau patience")
+    parser.add_argument("--lr-factor", type=float, default=0.5, help="Learning-rate multiplier on a plateau")
     parser.add_argument("--batch-size", type=int, default=32, help="Training/evaluation batch size")
     parser.add_argument("--lr", "--learning-rate", dest="lr", type=float, default=1e-3, help="AdamW learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
@@ -302,6 +438,7 @@ def parse_args(argv=None):
                         help="Mixed precision on CUDA (default: on in training, checkpoint setting in evaluation)")
     parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint, required in evaluate mode")
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
+    parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch_size < 1 or args.threads < 1 or args.workers < 0:
         parser.error("Epochs, batch size and threads must be positive, workers nonnegative")
@@ -309,6 +446,10 @@ def parse_args(argv=None):
         parser.error("Learning rate must be finite and positive, weight decay finite and nonnegative")
     if not 0 <= args.seed < 2**32:
         parser.error("Seed must be between 0 and 2**32 - 1")
+    if args.patience < 1 or args.lr_patience < 0 or not 0 < args.lr_factor < 1:
+        parser.error("Patience must be positive, LR patience nonnegative and LR factor between zero and one")
+    if not math.isfinite(args.min_delta) or args.min_delta < 0:
+        parser.error("Minimum loss decrease must be finite and nonnegative")
     if not args.check_environment:
         if args.data_root is None:
             parser.error("--data-root is required for training and evaluation")
@@ -316,6 +457,10 @@ def parse_args(argv=None):
             parser.error("--checkpoint is required in evaluate mode")
         if args.mode == "train" and (args.checkpoint is not None or args.eval_split is not None):
             parser.error("--checkpoint and --eval-split require --mode evaluate")
+        if args.mode == "evaluate" and args.resume is not None:
+            parser.error("--resume is only for training, use --checkpoint for evaluation")
+        if args.mode == "train" and args.save_predictions:
+            parser.error("--save-predictions is only for evaluation")
     if args.mode == "evaluate" and args.eval_split is None:
         args.eval_split = "val"
     if args.output is None:
