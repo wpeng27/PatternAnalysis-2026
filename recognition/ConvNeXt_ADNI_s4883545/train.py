@@ -25,12 +25,12 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 # Support both direct script execution and python -m recognition.<project>.train.
 if __package__:
-    from .dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
+    from .dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
     from .modules import MODEL_NAMES, build_model
     from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 else:
-    from dataset import ADNIDataset, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
+    from dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
     from modules import MODEL_NAMES, build_model
     from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
@@ -210,12 +210,13 @@ def make_loader(args, rows, device, training=False):
     from torch.utils.data import DataLoader
 
     return DataLoader(
-        ADNIDataset(args.data_root, rows, input_scaling=args.input_scaling), batch_size=args.batch_size,
+        ADNIDataset(args.data_root, rows, input_scaling=args.input_scaling,
+                    augmentation=args.train_augmentation if training else "none"), batch_size=args.batch_size,
         shuffle=training, num_workers=args.workers,
         pin_memory=(device.type == "cuda"), drop_last=False,
         worker_init_fn=seed_worker, generator=torch.Generator().manual_seed(args.seed),
         # Restart workers at each epoch boundary so their seeding can be restored
-        # from generator state during resume. Dataset transforms are deterministic.
+        # from generator state during resume. Random transforms use torch RNG.
         persistent_workers=False,
     )
 
@@ -232,7 +233,10 @@ def train(args) -> None:
     loaders = {split: make_loader(args, splits[split], device, training=(split == "train"))
                for split in ("train", "val")}
     # Preflight one real training image before allocating model/optimizer memory.
-    image, label = loaders["train"].dataset[0]
+    # Random augmentation in preflight must not change model initialization or
+    # consume the first training transform. PIL RandomAffine draws on CPU RNG.
+    with torch.random.fork_rng(devices=[]):
+        image, label = loaders["train"].dataset[0]
     if (image.shape != (3, IMAGE_SIZE, IMAGE_SIZE) or image.dtype != torch.float32
             or not torch.equal(image[0], image[1]) or not torch.equal(image[1], image[2])
             or not torch.isfinite(image).all()
@@ -256,7 +260,9 @@ def train(args) -> None:
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
                    "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
                    "preprocessing": PREPROCESSING_BY_SCALING[args.input_scaling],
-                   "augmentation": "none", "deterministic_algorithms": True,
+                   "augmentation": args.train_augmentation,
+                   "augmentation_settings": AUGMENTATION_SETTINGS[args.train_augmentation],
+                   "deterministic_algorithms": True,
                    "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
                    "split_sha256": audit["split_sha256"], "python": platform.python_version(),
                    "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else platform.processor(),
@@ -274,7 +280,8 @@ def train(args) -> None:
                                           "threshold": args.min_delta, "threshold_mode": "abs", "min_lr": 1e-6},
                    "regularization_settings": {"weight_decay": args.weight_decay, "drop_path_rate": args.drop_path_rate,
                                                "classifier_dropout": 0.2 if args.model == "small_cnn" else 0.0,
-                                               "label_smoothing": 0.0, "augmentation": "none", "gradient_clip_norm": 5.0},
+                                               "label_smoothing": 0.0, "augmentation": args.train_augmentation,
+                                               "gradient_clip_norm": 5.0},
                    "model_settings": {"architecture": str(model), "input_shape": [3, IMAGE_SIZE, IMAGE_SIZE], "num_classes": 2},
                    "selection_metric": "val.loss", "selection_unit": "slice",
                    "early_stopping_patience": args.patience, "early_stopping_min_delta": args.min_delta,
@@ -300,6 +307,9 @@ def train(args) -> None:
             raise ValueError("Resume setting differs from the original run: amp_dtype")
         if previous.get("model_kwargs", {"drop_path_rate": 0.0}) != model_kwargs:
             raise ValueError("Resume setting differs from the original run: model_kwargs")
+        if (previous.get("augmentation", "none") != args.train_augmentation
+                or previous.get("augmentation_settings", AUGMENTATION_SETTINGS["none"]) != config["augmentation_settings"]):
+            raise ValueError("Resume setting differs from the original run: augmentation")
         required_same = ("model", "batch_size", "lr", "weight_decay", "seed", "workers", "threads",
                          "effective_amp", "class_to_index", "preprocessing", "split_sha256", "device_type", "model_settings",
                          "device_name", "packages", "selection_rule", "early_stopping_patience",
@@ -439,6 +449,7 @@ def evaluate(args) -> dict:
               "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
               "model_kwargs": model_kwargs,
               "input_scaling": saved_scaling, "preprocessing": config["preprocessing"],
+              "training_augmentation": config.get("augmentation", "none"), "evaluation_augmentation": "none",
               "device": str(device), "batch_size": args.batch_size, "effective_amp": amp,
               "amp_dtype": amp_dtype_name,
               "seed": args.seed, "python": platform.python_version(), "torch": str(torch.__version__),
@@ -481,6 +492,8 @@ def parse_args(argv=None):
                         help="ConvNeXt maximum stochastic-depth probability (train default 0, evaluate inherits checkpoint)")
     parser.add_argument("--input-scaling", choices=("unit", "centered"), default=None,
                         help="unit=[0,1], centered=2*x-1 (train default unit, evaluation inherits checkpoint)")
+    parser.add_argument("--train-augmentation", choices=tuple(AUGMENTATION_SETTINGS), default="none",
+                        help="Training only: mild_affine rotates +/-7 degrees, shifts +/-5%% and scales 0.95-1.05")
     parser.add_argument("--seed", type=int, default=42, help="Random seed, must match split seed when training")
     parser.add_argument("--workers", type=int, default=2, help="DataLoader workers, zero disables subprocesses")
     parser.add_argument("--threads", type=int, default=4, help="PyTorch CPU threads")
@@ -493,6 +506,8 @@ def parse_args(argv=None):
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
     parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
+    if args.mode == "evaluate" and args.train_augmentation != "none":
+        parser.error("Augmentation is training-only. Evaluation always uses unchanged images.")
     if args.mode == "train" and args.input_scaling is None:
         args.input_scaling = "unit"
     if args.mode == "train" and args.amp_dtype is None:

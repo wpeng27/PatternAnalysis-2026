@@ -7,12 +7,14 @@ from pathlib import Path
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 import torch
 
 from dataset import audit_and_split, save_splits
 from metrics import aggregate_patients, classification_metrics
+from modules import build_model
 from train import parse_args, train
 from training_state import update_selection
 
@@ -80,10 +82,11 @@ class ResumeTests(unittest.TestCase):
         rows, report = audit_and_split(self.root)
         save_splits(self.splits, rows, report)
 
-    def run_training(self, name, epochs, resume=None, input_scaling="unit"):
+    def run_training(self, name, epochs, resume=None, input_scaling="unit", augmentation="none"):
         options = ["--data-root", str(self.root), "--splits", str(self.splits), "--output", str(self.base / name),
                    "--device", "cpu", "--workers", "0", "--threads", "2", "--batch-size", "2",
-                   "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling]
+                   "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling,
+                   "--train-augmentation", augmentation]
         if resume is not None:
             options.extend(["--resume", str(resume)])
         with redirect_stdout(io.StringIO()):
@@ -97,6 +100,32 @@ class ResumeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "preprocessing"):
             self.run_training("wrong_scaling", 2, self.base / "centered/last.pt")
         self.assertFalse((self.base / "wrong_scaling").exists())
+
+    def test_augmented_preflight_keeps_initial_weights_identical(self):
+        torch.manual_seed(42)
+        expected = build_model("small_cnn").state_dict()
+        def checked_build(*args, **kwargs):
+            model = build_model(*args, **kwargs)
+            self.assert_nested_equal(expected, model.state_dict())
+            return model
+        with patch("train.build_model", side_effect=checked_build) as mocked:
+            self.run_training("preflight", 1, input_scaling="centered", augmentation="mild_affine")
+        mocked.assert_called_once()
+
+    def test_affine_resume_matches_uninterrupted_and_rejects_changed_augmentation(self):
+        continuous = self.run_training("affine_continuous", 2, input_scaling="centered", augmentation="mild_affine")
+        first = self.run_training("affine_first", 1, input_scaling="centered", augmentation="mild_affine")
+        self.assertEqual(first["config"]["augmentation"], "mild_affine")
+        self.assertEqual(first["config"]["augmentation_settings"]["degrees"], [-7.0, 7.0])
+        resumed = self.run_training("affine_resumed", 2, self.base / "affine_first/last.pt",
+                                    input_scaling="centered", augmentation="mild_affine")
+        for key in ("model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "scaler_state_dict",
+                    "random_state", "selection_state"):
+            self.assert_nested_equal(continuous[key], resumed[key])
+        self.assertEqual(continuous["history"][1]["val"]["loss"], resumed["history"][1]["val"]["loss"])
+        with self.assertRaisesRegex(ValueError, "augmentation"):
+            self.run_training("wrong_augmentation", 2, self.base / "affine_first/last.pt", input_scaling="centered")
+        self.assertFalse((self.base / "wrong_augmentation").exists())
 
     def assert_nested_equal(self, left, right):
         if isinstance(left, torch.Tensor):

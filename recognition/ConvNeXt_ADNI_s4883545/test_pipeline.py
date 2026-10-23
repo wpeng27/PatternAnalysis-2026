@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from dataset import (ADNIDataset, assign_splits, audit_and_split, load_splits,
                      patient_and_slice, save_splits)
 from modules import build_model
-from train import run_epoch, seed_everything
+from train import make_loader, parse_args, run_epoch, seed_everything
 
 
 class DatasetTests(unittest.TestCase):
@@ -37,6 +37,45 @@ class DatasetTests(unittest.TestCase):
         for name in ("patient_92.jpeg", "392586.jpeg", "392586_92_extra.jpeg", "392586_92.png"):
             with self.assertRaises(ValueError):
                 patient_and_slice(name)
+
+    def test_affine_is_reproducible_preserves_channels_and_rejects_held_out_rows(self):
+        rows, _ = audit_and_split(self.root)
+        training = [r for r in rows if r["split"] == "train"]
+        augmented = ADNIDataset(self.root, training, "centered", "mild_affine")
+        plain, label = ADNIDataset(self.root, training, "centered")[0]
+        torch.manual_seed(42)
+        first, changed_label = augmented[0]
+        second, _ = augmented[0]
+        torch.manual_seed(42)
+        repeated, _ = augmented[0]
+        self.assertTrue(torch.equal(first, repeated))
+        self.assertFalse(torch.equal(first, second))
+        self.assertFalse(torch.equal(first, plain))
+        self.assertEqual(changed_label, label)
+        self.assertEqual(first.shape, (3, 224, 224))
+        self.assertTrue(torch.equal(first[0], first[1]) and torch.equal(first[1], first[2]))
+        self.assertTrue(torch.isfinite(first).all())
+        self.assertGreaterEqual(first.min().item(), -1)
+        self.assertLessEqual(first.max().item(), 1)
+        self.assertEqual(first.min().item(), -1)  # Black fill before centering.
+        for split in ("val", "test"):
+            with self.subTest(split=split), self.assertRaisesRegex(ValueError, "training rows"):
+                ADNIDataset(self.root, [r for r in rows if r["split"] == split], "centered", "mild_affine")
+
+    def test_loader_never_augments_validation_or_test(self):
+        rows, _ = audit_and_split(self.root)
+        args = parse_args(["--data-root", str(self.root), "--workers", "0",
+                           "--input-scaling", "centered", "--train-augmentation", "mild_affine"])
+        for split in ("train", "val", "test"):
+            selected = [r for r in rows if r["split"] == split]
+            loader = make_loader(args, selected, torch.device("cpu"), training=split == "train")
+            self.assertEqual(loader.dataset.augmentation, "mild_affine" if split == "train" else "none")
+            if split != "train":
+                before = torch.get_rng_state().clone()
+                actual, _ = loader.dataset[0]
+                expected, _ = ADNIDataset(self.root, selected, "centered")[0]
+                self.assertTrue(torch.equal(actual, expected))
+                self.assertTrue(torch.equal(before, torch.get_rng_state()))
 
     def test_centered_scaling_is_exact_and_preserves_labels_and_channels(self):
         rows, report = audit_and_split(self.root)

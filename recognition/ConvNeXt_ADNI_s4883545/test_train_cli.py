@@ -18,6 +18,14 @@ from train import PREPROCESSING, PREPROCESSING_BY_SCALING, evaluate, parse_args,
 
 
 class ArgumentTests(unittest.TestCase):
+    def test_augmentation_defaults_and_evaluation_rejection(self):
+        self.assertEqual(parse_args(["--data-root", "fixture"]).train_augmentation, "none")
+        self.assertEqual(parse_args(["--data-root", "fixture", "--train-augmentation", "mild_affine"]).train_augmentation,
+                         "mild_affine")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["--data-root", "fixture", "--mode", "evaluate", "--checkpoint", "best.pt",
+                        "--train-augmentation", "mild_affine"])
+
     def test_input_scaling_defaults_and_override(self):
         self.assertEqual(parse_args(["--data-root", "fixture"]).input_scaling, "unit")
         self.assertEqual(parse_args(["--data-root", "fixture", "--input-scaling", "centered"]).input_scaling, "centered")

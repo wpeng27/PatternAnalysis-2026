@@ -20,11 +20,19 @@ import re
 from PIL import Image, __version__ as pillow_version
 import torch
 from torch.utils.data import Dataset
+from torchvision.transforms import InterpolationMode, RandomAffine
 from torchvision.transforms import functional as TF
 
 CLASS_TO_INDEX = {"NC": 0, "AD": 1}
 SEED = 42
 IMAGE_SIZE = 224
+AUGMENTATION_SETTINGS = {
+    "none": {"name": "none"},
+    "mild_affine": {"name": "mild_affine", "degrees": [-7.0, 7.0],
+                    "translate": [0.05, 0.05], "scale": [0.95, 1.05],
+                    "shear": None, "interpolation": "bilinear", "fill": 0,
+                    "applied_to": "training grayscale PIL image after resize, before scaling and channel repetition"},
+}
 PARTITIONS = ("train", "val", "test")
 PATTERN = re.compile(r"([0-9]+)_([0-9]+)\.(?:jpeg|jpg)", re.IGNORECASE)
 FIELDS = ("path", "patient_id", "slice_id", "class_name", "label", "source_split",
@@ -245,15 +253,31 @@ class ADNIDataset(Dataset):
     """Float32 CHW tensors, bilinear 224x224 resize and three identical channels.
 
     Fixed unit [0, 1] or centered [-1, 1] scaling uses no dataset statistics.
-    No augmentation. Recheck hashes to reject data changed since the audit.
+    Optional mild affine augmentation is allowed only for audited train rows.
+    Recheck hashes to reject data changed since the audit.
     """
 
-    def __init__(self, root: Path, rows: list[dict], input_scaling: str = "unit"):
+    def __init__(self, root: Path, rows: list[dict], input_scaling: str = "unit",
+                 augmentation: str = "none"):
         if input_scaling not in {"unit", "centered"}:
             raise ValueError("input_scaling must be unit or centered")
         self.root = root.resolve(strict=True)
         self.rows = rows
         self.input_scaling = input_scaling
+        if augmentation not in AUGMENTATION_SETTINGS:
+            raise ValueError("Unknown augmentation")
+        if augmentation != "none" and any(row.get("split") != "train" for row in rows):
+            raise ValueError("Augmentation requires exclusively audited training rows")
+        self.augmentation = augmentation
+        self.transform = None
+        if augmentation == "mild_affine":
+            settings = AUGMENTATION_SETTINGS[augmentation]
+            # torchvision 0.24 API: https://docs.pytorch.org/vision/0.24/generated/torchvision.transforms.RandomAffine.html
+            # Local experimental bounds, not a clinically validated invariance.
+            # Transform one grayscale image so copied channels remain identical.
+            self.transform = RandomAffine(settings["degrees"], translate=settings["translate"],
+                                          scale=settings["scale"], interpolation=InterpolationMode.BILINEAR,
+                                          fill=settings["fill"])
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -268,6 +292,8 @@ class ADNIDataset(Dataset):
             raise ValueError(f"Image changed since split audit: {row['path']}")
         with Image.open(io.BytesIO(raw)) as image:
             gray = image.convert("L").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BILINEAR)
+            if self.transform is not None:
+                gray = self.transform(gray)
             tensor = TF.pil_to_tensor(gray).to(dtype=torch.float32).div_(255.0)
         if self.input_scaling == "centered":
             tensor = tensor.mul(2).sub(1)
