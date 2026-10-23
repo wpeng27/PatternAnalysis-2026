@@ -241,6 +241,7 @@ def train(args) -> None:
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config.update({"model": args.model, "pretrained": False, "effective_amp": amp,
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
+                   "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
                    "preprocessing": PREPROCESSING,
                    "augmentation": "none", "deterministic_algorithms": True,
                    "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
