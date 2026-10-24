@@ -18,3 +18,4 @@ __pycache__/
 # Local ConvNeXt launcher and experiment notes
 /recognition/ConvNeXt_ADNI_s4883545/launch_convnext.ps1
 /recognition/ConvNeXt_ADNI_s4883545/CONVNEXT_RUN.md
+/recognition/ConvNeXt_ADNI_s4883545/README_TEMP.md
