@@ -339,7 +339,7 @@ def train(args) -> None:
         shutil.copy2(best_source, args.output / "best.pt")
     write_json(args.output / "config.json", config)
     log_file = args.output / "training.log"
-    emit(f"PID {os.getpid()}. {SELECTION_RULE}. NC=0, AD=1. Test set closed.", log_file)
+    emit(f"PID {os.getpid()}. {SELECTION_RULE}. NC=0, AD=1. This run evaluates training and validation only.", log_file)
     startup_seconds = time.perf_counter() - segment_started
     process_startup_seconds = time.perf_counter() - PROCESS_STARTED
     status = {"state": "running", "pid": os.getpid(), "start_epoch": start_epoch,
