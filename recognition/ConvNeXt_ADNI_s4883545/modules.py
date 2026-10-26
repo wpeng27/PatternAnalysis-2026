@@ -1,6 +1,7 @@
 """ADNI model components. AI-assisted implementation for Weijie Peng's COMP3710 project."""
 
 import math
+from copy import deepcopy
 import torch
 from torch import nn
 from torchvision.ops import StochasticDepth
@@ -9,6 +10,56 @@ MODEL_NAMES = ("small_cnn", "convnext_tiny")
 NUM_CLASSES = 2
 INPUT_CHANNELS = 3
 IMAGE_SIZE = 224
+
+
+class ModelEMA:
+    """FP32 shadow weights, initialized from the fresh online model.
+
+    Standard EMA: shadow = decay * shadow + (1 - decay) * online.
+    Update after successful optimizer steps, as in the official ConvNeXt
+    engine: https://github.com/facebookresearch/ConvNeXt/blob/main/engine.py
+    This local implementation uses fixed decay without warmup. Floating buffers
+    are averaged and integer buffers copied. No optimizer or gradients belong
+    to the shadow model. ConvNeXt uses LayerNorm, so no BN recalibration is needed.
+    """
+
+    def __init__(self, model, decay):
+        if not math.isfinite(decay) or not 0 <= decay < 1:
+            raise ValueError("EMA decay must be finite and in [0, 1)")
+        self.model = deepcopy(model).float().eval().requires_grad_(False)
+        self.decay = decay
+        self.updates = 0
+
+    @torch.no_grad()
+    def update(self, model):
+        source = model.state_dict()
+        for name, shadow in self.model.state_dict().items():
+            current = source[name].detach().to(device=shadow.device, dtype=shadow.dtype)
+            if shadow.is_floating_point():
+                shadow.mul_(self.decay).add_(current, alpha=1 - self.decay)
+            else:
+                shadow.copy_(current)
+        self.updates += 1
+
+
+def checkpoint_weight_kind(checkpoint):
+    """Validate EMA identity before inference or resume, accepting legacy raw weights."""
+    config = checkpoint["config"]
+    kind = "ema" if config.get("ema", False) else "online"
+    if checkpoint.get("evaluation_weights", "online") != kind:
+        raise ValueError("Checkpoint evaluation weights do not match EMA configuration")
+    if config.get("validation_weights", "online") != kind:
+        raise ValueError("Checkpoint validation weights do not match EMA configuration")
+    if kind == "ema":
+        decay = config.get("ema_decay")
+        if decay is None or not math.isfinite(decay) or not 0 <= decay < 1:
+            raise ValueError("Invalid checkpoint EMA decay")
+        if "training_model_state_dict" not in checkpoint:
+            raise ValueError("EMA checkpoint is missing online training weights")
+        expected = sum(r["train"]["optimizer_steps"] for r in checkpoint["history"])
+        if checkpoint.get("ema_updates") != expected or expected < 1:
+            raise ValueError("EMA update count does not match successful optimizer steps")
+    return kind
 
 
 class ConvNeXtBlock(nn.Module):

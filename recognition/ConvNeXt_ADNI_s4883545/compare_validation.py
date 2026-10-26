@@ -74,6 +74,10 @@ def require_metrics_match(expected, recorded):
 
 def verify_run(run, evaluation_dir, expected_model, rows, audit):
     import torch
+    if __package__:
+        from .modules import checkpoint_weight_kind
+    else:
+        from modules import checkpoint_weight_kind
 
     config = read_json(run / "config.json")
     status = read_json(run / "status.json")
@@ -103,6 +107,12 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
     if evaluation["checkpoint_sha256"] != checkpoint_hash:
         raise ValueError("Evaluation does not identify the current best checkpoint")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    weight_kind = checkpoint_weight_kind(checkpoint)
+    if (evaluation.get("evaluation_weights", "online") != weight_kind
+            or config.get("ema", False) != checkpoint["config"].get("ema", False)
+            or config.get("validation_weights", "online") != weight_kind
+            or (weight_kind == "ema" and config.get("ema_decay") != checkpoint["config"].get("ema_decay"))):
+        raise ValueError("Evaluation/checkpoint EMA identity mismatch")
     if checkpoint["model_name"] != expected_model or checkpoint["epoch"] != selected["epoch"]:
         raise ValueError("Checkpoint model/epoch mismatch")
     for key in ("model", "class_to_index", "preprocessing", "seed", "split_sha256", "selection_rule",
@@ -134,6 +144,7 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
                  "seed", "workers", "threads", "precision", "preprocessing", "augmentation", "model_settings",
                  "early_stopping_patience", "early_stopping_min_delta", "packages", "scheduler")}
     settings.update(total_epochs=len(history), selected_epoch=selected["epoch"],
+                    evaluation_weights=weight_kind, ema_settings=config.get("ema_settings"),
                     weight_decay_policy=config.get("weight_decay_policy", "all"),
                     optimizer_parameter_groups=config.get("optimizer_parameter_groups"),
                     model_kwargs=config.get("model_kwargs"),

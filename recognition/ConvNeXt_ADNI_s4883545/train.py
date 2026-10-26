@@ -26,12 +26,12 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 # Support both direct script execution and python -m recognition.<project>.train.
 if __package__:
     from .dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from .modules import MODEL_NAMES, build_model, weight_decay_groups
+    from .modules import MODEL_NAMES, build_model, weight_decay_groups, ModelEMA, checkpoint_weight_kind
     from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 else:
     from dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from modules import MODEL_NAMES, build_model, weight_decay_groups
+    from modules import MODEL_NAMES, build_model, weight_decay_groups, ModelEMA, checkpoint_weight_kind
     from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 
@@ -103,7 +103,7 @@ def seed_worker(worker_id: int) -> None:
 
 
 def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None,
-              patient_rows=None, include_predictions=False, log_file=None, amp_dtype=None) -> dict:
+              patient_rows=None, include_predictions=False, log_file=None, amp_dtype=None, ema=None) -> dict:
     """Sample-weighted loss and accuracy, including the final partial batch."""
     import torch
     from torch import nn
@@ -146,6 +146,8 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
                 scaler.update()
                 if scaler.get_scale() < previous_scale:
                     skipped_updates += 1
+                elif ema is not None:
+                    ema.update(model)
             count = labels.numel()
             samples += count
             total_loss += loss.item() * count
@@ -246,6 +248,7 @@ def train(args) -> None:
           f"input_scaling={args.input_scaling}", flush=True)
     model_kwargs = {"drop_path_rate": args.drop_path_rate}
     model = build_model(args.model, **model_kwargs).to(device)
+    ema = ModelEMA(model, args.ema_decay) if args.ema else None
     parameter_groups, group_metadata = weight_decay_groups(model, args.weight_decay, args.weight_decay_policy)
     optimizer = torch.optim.AdamW(parameter_groups, lr=args.lr, weight_decay=args.weight_decay)
     amp = (args.amp is not False) and device.type == "cuda"
@@ -272,6 +275,11 @@ def train(args) -> None:
                                 ("torch", "torchvision", "Pillow", "numpy", "scikit-learn", "matplotlib")},
                    "source_sha256": {p.name: sha256(p.read_bytes()) for p in Path(__file__).parent.glob("*.py")}})
     config.update({"checkpoint_version": 2, "selection_rule": SELECTION_RULE,
+                   "validation_weights": "ema" if ema is not None else "online",
+                   "ema_settings": {"enabled": args.ema, "decay": args.ema_decay,
+                                    "initialization": "Copy fresh online model", "warmup": False,
+                                    "update": "After each successful optimizer step only",
+                                    "dtype": "float32", "buffers": "Average floating, copy integer"},
                    "model_kwargs": model_kwargs,
                    "optimizer_parameter_groups": group_metadata,
                    "optimizer_settings": {"name": "AdamW", "lr": args.lr,
@@ -308,6 +316,9 @@ def train(args) -> None:
         if saved.get("checkpoint_version") != 2:
             raise ValueError("This checkpoint lacks complete resume state. Old checkpoints remain evaluation-only.")
         previous = saved["config"]
+        checkpoint_weight_kind(saved)
+        if previous.get("ema", False) != args.ema or (args.ema and previous.get("ema_decay") != args.ema_decay):
+            raise ValueError("Resume setting differs from the original run: ema/ema_decay")
         if previous.get("weight_decay_policy", "all") != args.weight_decay_policy:
             raise ValueError("Resume setting differs from the original run: weight_decay_policy")
         if (previous.get("optimizer_parameter_groups") is not None
@@ -336,7 +347,10 @@ def train(args) -> None:
         best_source = args.resume.parent / "best.pt"
         if not best_source.is_file() or sha256(best_source.read_bytes()) != saved["best_checkpoint_sha256"]:
             raise ValueError("Resume requires the unchanged companion best.pt beside last.pt")
-        model.load_state_dict(saved["model_state_dict"])
+        model.load_state_dict(saved["training_model_state_dict"] if ema is not None else saved["model_state_dict"])
+        if ema is not None:
+            ema.model.load_state_dict(saved["model_state_dict"], strict=True)
+            ema.updates = saved["ema_updates"]
         optimizer.load_state_dict(saved["optimizer_state_dict"])
         scheduler.load_state_dict(saved["scheduler_state_dict"])
         scaler.load_state_dict(saved["scaler_state_dict"])
@@ -366,24 +380,30 @@ def train(args) -> None:
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
             training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp, log_file=log_file,
-                                 amp_dtype=amp_dtype)
+                                 amp_dtype=amp_dtype, ema=ema)
             allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
             reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
-            validation = run_epoch(model, loaders["val"], device, amp=amp,
+            evaluation_model = ema.model if ema is not None else model
+            validation = run_epoch(evaluation_model, loaders["val"], device, amp=amp,
                                    patient_rows=splits["val"], log_file=log_file, amp_dtype=amp_dtype)
             scheduler.step(validation["loss"])
             improved = update_selection(selection, validation["loss"], epoch, args.patience, args.min_delta)
             record = {"epoch": epoch, "train": training, "val": validation,
+                      "validation_weights": config["validation_weights"],
+                      "ema_updates": ema.updates if ema is not None else 0,
                       "learning_rate": current_lr, "next_learning_rate": optimizer.param_groups[0]["lr"],
                       "epoch_seconds": time.perf_counter() - epoch_started,
                       "peak_training_allocated_bytes": allocated, "peak_training_reserved_bytes": reserved,
                       "selected_as_best": improved, "bad_epochs": selection["bad_epochs"]}
             history.append(record)
             checkpoint = {"checkpoint_version": 2, "model_name": args.model, "epoch": epoch,
-                          "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
+                          "model_state_dict": evaluation_model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
+                          "evaluation_weights": config["validation_weights"],
                           "scheduler_state_dict": scheduler.state_dict(), "scaler_state_dict": scaler.state_dict(),
                           "random_state": capture_random_state(loaders), "selection_state": dict(selection),
                           "config": config, "history": history}
+            if ema is not None:
+                checkpoint.update(training_model_state_dict=model.state_dict(), ema_updates=ema.updates)
             if improved:
                 save_checkpoint(args.output / "best.pt", checkpoint)
             checkpoint["best_checkpoint_sha256"] = sha256((args.output / "best.pt").read_bytes())
@@ -425,6 +445,7 @@ def evaluate(args) -> dict:
     raw = args.checkpoint.read_bytes()
     checkpoint = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
     config = checkpoint.get("config", {})
+    evaluation_weights = checkpoint_weight_kind(checkpoint)
     if checkpoint.get("model_name") != args.model:
         raise ValueError("Selected --model does not match the checkpoint model")
     saved_scaling = config.get("input_scaling", "unit")
@@ -457,6 +478,7 @@ def evaluate(args) -> dict:
     result = {"mode": "evaluate", "model": args.model, "split": args.eval_split,
               "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": sha256(raw),
               "checkpoint_epoch": checkpoint["epoch"], "split_sha256": audit["split_sha256"],
+              "evaluation_weights": evaluation_weights, "ema_decay": config.get("ema_decay") if config.get("ema") else None,
               "model_kwargs": model_kwargs,
               "input_scaling": saved_scaling, "preprocessing": config["preprocessing"],
               "training_augmentation": config.get("augmentation", "none"), "evaluation_augmentation": "none",
@@ -500,6 +522,8 @@ def parse_args(argv=None):
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
     parser.add_argument("--weight-decay-policy", choices=("all", "exclude_1d_bias"), default="all",
                         help="Training optimizer: all parameters, or zero decay for biases and 1D tensors")
+    parser.add_argument("--ema", action="store_true", help="Train with an FP32 EMA shadow and select using EMA validation loss")
+    parser.add_argument("--ema-decay", type=float, default=None, help="Fixed EMA decay per successful optimizer step (train default 0.999)")
     parser.add_argument("--drop-path-rate", type=float, default=None,
                         help="ConvNeXt maximum stochastic-depth probability (train default 0, evaluate inherits checkpoint)")
     parser.add_argument("--input-scaling", choices=("unit", "centered"), default=None,
@@ -518,6 +542,14 @@ def parse_args(argv=None):
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
     parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
+    if args.mode == "evaluate" and (args.ema or args.ema_decay is not None):
+        parser.error("EMA evaluation weights are inherited from the checkpoint, omit --ema and --ema-decay")
+    if args.ema_decay is not None and not args.ema:
+        parser.error("--ema-decay requires --ema")
+    if args.ema_decay is None:
+        args.ema_decay = 0.999
+    if not math.isfinite(args.ema_decay) or not 0 <= args.ema_decay < 1:
+        parser.error("EMA decay must be finite and in [0, 1)")
     if args.mode == "evaluate" and args.train_augmentation != "none":
         parser.error("Augmentation is training-only. Evaluation always uses unchanged images.")
     if args.mode == "train" and args.input_scaling is None:

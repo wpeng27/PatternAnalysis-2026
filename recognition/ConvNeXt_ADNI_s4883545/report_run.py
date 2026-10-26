@@ -117,7 +117,8 @@ def final_report(run, evaluation_path):
     for axis, (key, title) in zip(axes.flat, (("loss", "Slice cross-entropy"), ("accuracy", "Slice accuracy"),
                                            ("macro_f1", "Slice macro-F1"), ("ad_auroc", "Slice AD AUROC"))):
         axis.plot(epochs, [r["train"][key] for r in history], label="Train (online)", marker=".")
-        axis.plot(epochs, [r["val"][key] for r in history], label="Validation", marker=".")
+        axis.plot(epochs, [r["val"][key] for r in history],
+                  label="Validation (EMA)" if config.get("ema", False) else "Validation", marker=".")
         axis.axvline(best["epoch"], color="gray", linestyle="--", linewidth=1, label="Selected epoch")
         axis.set(title=title, xlabel="Epoch")
         axis.grid(alpha=0.2)
@@ -130,6 +131,7 @@ def final_report(run, evaluation_path):
     segments = segment_lineage(run)
     summary = {
         "state": "completed_and_best_checkpoint_reloaded", "stop_reason": status["stop_reason"],
+        "evaluation_weights": config.get("validation_weights", "online"),
         "epochs_completed": len(history), "best_epoch": best["epoch"], "selection_rule": config["selection_rule"],
         "checkpoint_sha256": sha256(best_path.read_bytes()), "class_to_index": config["class_to_index"],
         "parameter_count": config["parameter_count"], "gpu": config["device_name"],

@@ -83,13 +83,15 @@ class ResumeTests(unittest.TestCase):
         save_splits(self.splits, rows, report)
 
     def run_training(self, name, epochs, resume=None, input_scaling="unit", augmentation="none",
-                     weight_decay_policy="all"):
+                     weight_decay_policy="all", ema_decay=None):
         options = ["--data-root", str(self.root), "--splits", str(self.splits), "--output", str(self.base / name),
                    "--device", "cpu", "--workers", "0", "--threads", "2", "--batch-size", "2",
                    "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling,
                    "--train-augmentation", augmentation, "--weight-decay-policy", weight_decay_policy]
         if resume is not None:
             options.extend(["--resume", str(resume)])
+        if ema_decay is not None:
+            options.extend(["--ema", "--ema-decay", str(ema_decay)])
         with redirect_stdout(io.StringIO()):
             train(parse_args(options))
         return torch.load(self.base / name / "last.pt", map_location="cpu", weights_only=True)
@@ -168,6 +170,40 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(uninterrupted["history"][1]["val"]["loss"], resumed["history"][1]["val"]["loss"])
         best = torch.load(self.base / "resumed/best.pt", map_location="cpu", weights_only=True)
         self.assertEqual(best["epoch"], resumed["selection_state"]["best_epoch"])
+
+    def test_ema_resume_restores_both_weights_and_matches_continuous(self):
+        continuous = self.run_training("ema_continuous", 2, ema_decay=0.9, weight_decay_policy="exclude_1d_bias")
+        first = self.run_training("ema_first", 1, ema_decay=0.9, weight_decay_policy="exclude_1d_bias")
+        resumed = self.run_training("ema_resumed", 2, self.base / "ema_first/last.pt",
+                                    ema_decay=0.9, weight_decay_policy="exclude_1d_bias")
+        for key in ("model_state_dict", "training_model_state_dict", "ema_updates", "optimizer_state_dict",
+                    "scheduler_state_dict", "scaler_state_dict", "random_state", "selection_state"):
+            self.assert_nested_equal(continuous[key], resumed[key])
+        self.assertEqual(continuous["history"][1]["val"]["loss"], resumed["history"][1]["val"]["loss"])
+        self.assertEqual(first["evaluation_weights"], "ema")
+        self.assertEqual(resumed["ema_updates"], 2)
+        self.assertTrue(any(not torch.equal(first['model_state_dict'][k], v)
+                            for k, v in first['training_model_state_dict'].items()))
+        for name, decay in (("ema_disabled", None), ("ema_changed", 0.8)):
+            with self.assertRaisesRegex(ValueError, "ema"):
+                self.run_training(name, 2, self.base / "ema_first/last.pt", ema_decay=decay,
+                                  weight_decay_policy="exclude_1d_bias")
+            self.assertFalse((self.base / name).exists())
+        from train import evaluate
+        from compare_validation import verify_run
+        from dataset import load_splits
+        best = torch.load(self.base / "ema_resumed/best.pt", map_location="cpu", weights_only=True)
+        args = parse_args(["--mode", "evaluate", "--checkpoint", str(self.base / "ema_resumed/best.pt"),
+                           "--data-root", str(self.root), "--splits", str(self.splits), "--device", "cpu",
+                           "--batch-size", "2", "--threads", "2", "--workers", "0", "--save-predictions",
+                           "--output", str(self.base / "ema_evaluation")])
+        with redirect_stdout(io.StringIO()):
+            result = evaluate(args)
+        self.assertEqual(result["evaluation_weights"], "ema")
+        self.assertAlmostEqual(result["metrics"]["loss"], best['history'][best['epoch']-1]['val']['loss'])
+        rows, audit = load_splits(self.splits)
+        verified, _ = verify_run(self.base / "ema_resumed", self.base / "ema_evaluation", "small_cnn", rows['val'], audit)
+        self.assertEqual(verified['settings']['evaluation_weights'], 'ema')
 
 
 if __name__ == "__main__":
