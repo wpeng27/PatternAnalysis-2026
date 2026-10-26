@@ -127,16 +127,15 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
     if evaluation.get("preprocessing", config["preprocessing"]) != config["preprocessing"]:
         raise ValueError("Evaluation preprocessing mismatch")
     groups = checkpoint["optimizer_state_dict"]["param_groups"]
-    for group in groups:
-        if (not group.get("decoupled_weight_decay") or group["weight_decay"] != config["weight_decay"]
-                or group["lr"] != selected["next_learning_rate"]):
-            raise ValueError("Saved AdamW group settings differ from the selected history/configuration")
+    verify_optimizer_groups(checkpoint, config, selected["next_learning_rate"])
     group_settings = [{k: v for k, v in group.items() if k != "params"} for group in groups]
     scheduler = checkpoint["scheduler_state_dict"]
     settings = {key: config[key] for key in ("pretrained", "parameter_count", "batch_size", "lr", "weight_decay",
                  "seed", "workers", "threads", "precision", "preprocessing", "augmentation", "model_settings",
                  "early_stopping_patience", "early_stopping_min_delta", "packages", "scheduler")}
     settings.update(total_epochs=len(history), selected_epoch=selected["epoch"],
+                    weight_decay_policy=config.get("weight_decay_policy", "all"),
+                    optimizer_parameter_groups=config.get("optimizer_parameter_groups"),
                     model_kwargs=config.get("model_kwargs"),
                     optimizer_config=config.get("optimizer_settings"),
                     selected_checkpoint_optimizer_groups=group_settings,
@@ -159,6 +158,34 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
                            "classification_metrics_recomputed": True, "patient_metrics_recomputed": True,
                            "slice_logit_loss_matches_selected_history": True, "checkpoint_hash_and_settings_match": True}}
     return result, probabilities
+
+
+def verify_optimizer_groups(checkpoint, config, learning_rate):
+    """Check actual decay rates and membership, including legacy single groups."""
+    import torch
+    if __package__:
+        from .modules import build_model, weight_decay_groups
+    else:
+        from modules import build_model, weight_decay_groups
+    policy = config.get("weight_decay_policy", "all")
+    if checkpoint["config"].get("weight_decay_policy", "all") != policy:
+        raise ValueError("Checkpoint/run weight-decay policy mismatch")
+    with torch.random.fork_rng(devices=[]):
+        model = build_model(config["model"], **config.get("model_kwargs", {}))
+    expected, metadata = weight_decay_groups(model, config["weight_decay"], policy)
+    for record in (config, checkpoint["config"]):
+        recorded = record.get("optimizer_parameter_groups")
+        if (recorded is not None or policy != "all") and recorded != metadata:
+            raise ValueError("Optimizer parameter-group metadata mismatch")
+    actual = checkpoint["optimizer_state_dict"]["param_groups"]
+    ids = [index for group in actual for index in group["params"]]
+    if len(actual) != len(expected) or len(ids) != len(set(ids)):
+        raise ValueError("Optimizer group count or unique membership mismatch")
+    for group, wanted in zip(actual, expected):
+        if (not group.get("decoupled_weight_decay") or group["weight_decay"] != wanted["weight_decay"]
+                or group["lr"] != learning_rate or len(group["params"]) != len(wanted["params"])
+                or (policy != "all" and group.get("param_names") != wanted["param_names"])):
+            raise ValueError("Saved AdamW group settings differ from the selected history/configuration")
 
 
 def paired_counts(labels, cnn_probabilities, convnext_probabilities):

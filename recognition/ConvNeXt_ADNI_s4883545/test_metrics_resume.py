@@ -82,11 +82,12 @@ class ResumeTests(unittest.TestCase):
         rows, report = audit_and_split(self.root)
         save_splits(self.splits, rows, report)
 
-    def run_training(self, name, epochs, resume=None, input_scaling="unit", augmentation="none"):
+    def run_training(self, name, epochs, resume=None, input_scaling="unit", augmentation="none",
+                     weight_decay_policy="all"):
         options = ["--data-root", str(self.root), "--splits", str(self.splits), "--output", str(self.base / name),
                    "--device", "cpu", "--workers", "0", "--threads", "2", "--batch-size", "2",
                    "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling,
-                   "--train-augmentation", augmentation]
+                   "--train-augmentation", augmentation, "--weight-decay-policy", weight_decay_policy]
         if resume is not None:
             options.extend(["--resume", str(resume)])
         with redirect_stdout(io.StringIO()):
@@ -140,6 +141,20 @@ class ResumeTests(unittest.TestCase):
                 self.assert_nested_equal(a, b)
         else:
             self.assertEqual(left, right)
+
+    def test_grouped_decay_resume_is_exact_and_rejects_policy_change(self):
+        continuous = self.run_training("grouped_continuous", 2, weight_decay_policy="exclude_1d_bias")
+        first = self.run_training("grouped_first", 1, weight_decay_policy="exclude_1d_bias")
+        resumed = self.run_training("grouped_resumed", 2, self.base / "grouped_first/last.pt",
+                                    weight_decay_policy="exclude_1d_bias")
+        for key in ("model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "random_state", "selection_state"):
+            self.assert_nested_equal(continuous[key], resumed[key])
+        self.assertEqual(continuous["history"][1]["val"]["loss"], resumed["history"][1]["val"]["loss"])
+        self.assertEqual(first["config"]["weight_decay_policy"], "exclude_1d_bias")
+        self.assertEqual([g["weight_decay"] for g in first["optimizer_state_dict"]["param_groups"]], [0.0001, 0.0])
+        with self.assertRaisesRegex(ValueError, "weight_decay_policy"):
+            self.run_training("bad_policy", 2, self.base / "grouped_first/last.pt")
+        self.assertFalse((self.base / "bad_policy").exists())
 
     def test_resume_matches_uninterrupted_model_optimizer_scheduler_and_rng(self):
         uninterrupted = self.run_training("continuous", 2)

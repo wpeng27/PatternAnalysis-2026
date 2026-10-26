@@ -183,3 +183,39 @@ def build_model(name: str, drop_path_rate: float = 0.0) -> nn.Module:
     if name == "convnext_tiny":
         return ConvNeXtTiny(drop_path_rate=drop_path_rate)
     raise ValueError(f"Unknown model {name!r}. Choose from {MODEL_NAMES}.")
+
+
+def weight_decay_groups(model: nn.Module, weight_decay: float, policy: str = "all"):
+    """Return deterministic AdamW groups and a serializable membership record.
+
+    exclude_1d_bias follows the official ConvNeXt grouping rule: biases and
+    one-dimensional parameters receive zero decay, including LayerNorm and
+    layer-scale gamma. All remaining trainable tensors receive weight_decay.
+    https://github.com/facebookresearch/ConvNeXt/blob/main/optim_factory.py
+    The legacy 'all' policy keeps the original parameter order/group layout.
+    """
+    if policy not in {"all", "exclude_1d_bias"}:
+        raise ValueError("Unknown weight-decay policy")
+    if not math.isfinite(weight_decay) or weight_decay < 0:
+        raise ValueError("Weight decay must be finite and nonnegative")
+    named = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if not named:
+        raise ValueError("Optimizer requires trainable parameters")
+    buckets = {"all": named} if policy == "all" else {"decay": [], "no_decay": []}
+    if policy != "all":
+        for name, parameter in named:
+            key = "no_decay" if parameter.ndim == 1 or name.endswith(".bias") else "decay"
+            buckets[key].append((name, parameter))
+    groups, metadata = [], []
+    for group_name, members in buckets.items():
+        if not members:
+            continue
+        decay = 0.0 if group_name == "no_decay" else float(weight_decay)
+        names = [name for name, _ in members]
+        group = {"params": [parameter for _, parameter in members], "weight_decay": decay}
+        if policy != "all":
+            group["param_names"] = names  # Persist actual optimizer membership.
+        groups.append(group)
+        metadata.append({"name": group_name, "weight_decay": decay, "parameter_names": names,
+                         "parameter_count": sum(parameter.numel() for _, parameter in members)})
+    return groups, metadata

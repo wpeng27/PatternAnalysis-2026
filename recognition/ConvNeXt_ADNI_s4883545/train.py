@@ -26,12 +26,12 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 # Support both direct script execution and python -m recognition.<project>.train.
 if __package__:
     from .dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from .modules import MODEL_NAMES, build_model
+    from .modules import MODEL_NAMES, build_model, weight_decay_groups
     from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 else:
     from dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
-    from modules import MODEL_NAMES, build_model
+    from modules import MODEL_NAMES, build_model, weight_decay_groups
     from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
 
@@ -246,7 +246,8 @@ def train(args) -> None:
           f"input_scaling={args.input_scaling}", flush=True)
     model_kwargs = {"drop_path_rate": args.drop_path_rate}
     model = build_model(args.model, **model_kwargs).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    parameter_groups, group_metadata = weight_decay_groups(model, args.weight_decay, args.weight_decay_policy)
+    optimizer = torch.optim.AdamW(parameter_groups, lr=args.lr, weight_decay=args.weight_decay)
     amp = (args.amp is not False) and device.type == "cuda"
     amp_dtype = getattr(torch, args.amp_dtype)
     if amp and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
@@ -272,13 +273,17 @@ def train(args) -> None:
                    "source_sha256": {p.name: sha256(p.read_bytes()) for p in Path(__file__).parent.glob("*.py")}})
     config.update({"checkpoint_version": 2, "selection_rule": SELECTION_RULE,
                    "model_kwargs": model_kwargs,
+                   "optimizer_parameter_groups": group_metadata,
                    "optimizer_settings": {"name": "AdamW", "lr": args.lr,
                                           "weight_decay": args.weight_decay, "betas": [0.9, 0.999],
-                                          "eps": 1e-8, "parameter_groups": "All parameters, including biases and normalization"},
+                                          "eps": 1e-8, "parameter_groups":
+                                          "All parameters, including biases and normalization" if args.weight_decay_policy == "all"
+                                          else "No decay for biases and 1D parameters, configured decay for remaining weights"},
                    "scheduler_settings": {"name": "ReduceLROnPlateau", "metric": "val.loss", "mode": "min",
                                           "factor": args.lr_factor, "patience": args.lr_patience,
                                           "threshold": args.min_delta, "threshold_mode": "abs", "min_lr": 1e-6},
                    "regularization_settings": {"weight_decay": args.weight_decay, "drop_path_rate": args.drop_path_rate,
+                                               "weight_decay_policy": args.weight_decay_policy,
                                                "classifier_dropout": 0.2 if args.model == "small_cnn" else 0.0,
                                                "label_smoothing": 0.0, "augmentation": args.train_augmentation,
                                                "gradient_clip_norm": 5.0},
@@ -303,6 +308,11 @@ def train(args) -> None:
         if saved.get("checkpoint_version") != 2:
             raise ValueError("This checkpoint lacks complete resume state. Old checkpoints remain evaluation-only.")
         previous = saved["config"]
+        if previous.get("weight_decay_policy", "all") != args.weight_decay_policy:
+            raise ValueError("Resume setting differs from the original run: weight_decay_policy")
+        if (previous.get("optimizer_parameter_groups") is not None
+                and previous["optimizer_parameter_groups"] != group_metadata):
+            raise ValueError("Resume optimizer parameter groups differ from the original run")
         if previous.get("amp_dtype", "float16") != args.amp_dtype:
             raise ValueError("Resume setting differs from the original run: amp_dtype")
         if previous.get("model_kwargs", {"drop_path_rate": 0.0}) != model_kwargs:
@@ -488,6 +498,8 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=32, help="Training/evaluation batch size")
     parser.add_argument("--lr", "--learning-rate", dest="lr", type=float, default=1e-3, help="AdamW learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
+    parser.add_argument("--weight-decay-policy", choices=("all", "exclude_1d_bias"), default="all",
+                        help="Training optimizer: all parameters, or zero decay for biases and 1D tensors")
     parser.add_argument("--drop-path-rate", type=float, default=None,
                         help="ConvNeXt maximum stochastic-depth probability (train default 0, evaluate inherits checkpoint)")
     parser.add_argument("--input-scaling", choices=("unit", "centered"), default=None,
