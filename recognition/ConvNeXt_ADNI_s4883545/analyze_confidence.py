@@ -12,6 +12,7 @@ from collections import defaultdict
 import csv
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
@@ -252,6 +253,14 @@ def write_report(output, result):
              f"Primary unit: slice. Same {result['validation_cases']} validation slices from "
              f"{result['validation_patients']} patients. NC=0, AD=1. "
              "Predict AD if P(AD)>0.5, otherwise NC. Confidence=max(P(AD),1-P(AD)). No calibration was fitted.", "",
+             "## Checkpoint identity", "",
+             "| Model | Selected epoch | Evaluation weights | Checkpoint SHA-256 |",
+             "|---|---:|---|---|"]
+    for model in result["models"]:
+        verified = model["verification"]
+        lines.append(f"| {model['name']} | {verified['selected_epoch']} | "
+                     f"{verified['settings'].get('evaluation_weights', 'online')} | `{verified['checkpoint_sha256']}` |")
+    lines += ["",
              "## Selection rule declared before analysis", "", result["selection_rule"], "",
              f"Target: accepted-case accuracy >= {percent(result['target_accuracy'])}, "
              f"coverage >= {percent(result['minimum_coverage'])}. These are proposed project targets, not task-sheet requirements. "
@@ -297,10 +306,12 @@ def write_report(output, result):
                          f"{s['accepted_errors']} | {percent(s['per_class']['NC']['coverage'])} | "
                          f"{percent(s['per_class']['AD']['coverage'])} |")
         high = next(s for s in model["fixed_thresholds"] if s["threshold"] == 0.95)
+        retained_examples = sum(e["accepted_by_selected_rule"] is True for e in model["top_errors_distinct_patients"])
         lines += ["", f"At confidence >=0.95, {high['accepted_errors']} errors remain: "
                   f"{high['per_class']['NC']['accepted_errors']} NC-to-AD false positives and "
                   f"{high['per_class']['AD']['accepted_errors']} AD-to-NC false negatives. "
-                  "The five ranked examples below also survive the selected threshold when a policy exists."]
+                  f"Of the {len(model['top_errors_distinct_patients'])} ranked examples below, "
+                  f"{retained_examples} survive the selected policy (zero if no policy exists)."]
         s = model["selected"]
         if s:
             lines += ["", "At the selected threshold:", ""]
@@ -336,14 +347,16 @@ def write_report(output, result):
               "Settings including preprocessing, precision and training budgets differ between the two models.", "",
               "Full curves, reliability-bin counts, high-confidence error counts, class retention, bootstrap settings "
               "and provenance are saved in analysis.json. Ranked error identities stay local in ignored artifacts. "
-              "Use selected_policies.json to preserve exact thresholds and checkpoint/prediction hashes before final evaluation. "
-              "No test predictions or test metrics were read. Final unfiltered test accuracy remains pending.", "",
+              "Use selected_policies.json to preserve exact thresholds and checkpoint/prediction hashes. "
+              "No test predictions or test metrics were used in this analysis.", "",
+              ("These models were previously evaluated on test. This is a new validation-only threshold analysis after "
+               "test exposure, not a new pre-test freeze. Earlier test results and referral policies remain separate. "
+               "The newly selected policy has not been applied to test here."
+               if result["experiment_status"] == "after_test_exposure" else
+               "This report does not establish whether any separate test evaluation has occurred. "
+               "The policy is selected from validation only."), "",
               "## Reproduce", "", "Run from the repository root with a new output directory:", "", "```powershell",
-              "$p = 'recognition/ConvNeXt_ADNI_s4883545'",
-              'py -3.13 "$p/analyze_confidence.py" --cnn-run "$p/artifacts/runs/baseline_small_cnn_20261023" '
-              '--convnext-run "$p/artifacts/runs/convnext_affine_continue30_20261024" '
-              '--splits "$p/artifacts/splits_seed42" --data-root ADNI/AD_NC '
-              '--target-accuracy 0.90 --minimum-coverage 0.50 --output "$p/artifacts/validation_confidence_recheck"',
+              result["reproduce_command"],
               "```", "", "Omit --data-root to regenerate the numeric analysis without the error-image panels. "
               "If custom targets are used, pass those original values instead. Numerical reports include exact "
               "targets and source hashes. Checkpoints and error images are local artifacts and must not be committed."]
@@ -361,6 +374,8 @@ def main():
     parser.add_argument("--data-root", type=Path, help="Optional: render verified validation error images")
     parser.add_argument("--target-accuracy", type=float, default=0.90)
     parser.add_argument("--minimum-coverage", type=float, default=0.50)
+    parser.add_argument("--experiment-status", choices=("validation_analysis", "after_test_exposure"),
+                        default="validation_analysis", help="Report context only, never reads test predictions")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Choose a fresh output directory")
@@ -374,6 +389,8 @@ def main():
             (args.convnext_run, args.convnext_evaluation, "convnext_tiny", "ConvNeXt-Tiny")):
         verified, p_ad = verify_run(run, evaluation or run.with_name(run.name + "_validation"),
                                     model_name, rows, audit)
+        if verified["settings"].get("evaluation_weights") == "ema":
+            title += " (EMA)"
         curve = coverage_curve(labels, p_ad)
         choice = select_threshold(curve, args.target_accuracy, args.minimum_coverage)
         threshold = choice["threshold"] if choice else None
@@ -387,11 +404,25 @@ def main():
                        "fixed_thresholds": [threshold_summary(labels, p_ad, t) for t in (0.5, 0.7, 0.8, 0.9, 0.95, 0.99)],
                        "confidence_samples": {str(good): confidence[correct == good].tolist() for good in (True, False)}})
     result = {"state": "verified_validation_confidence_analysis", "test_evaluated": False,
+              "experiment_status": args.experiment_status,
+              "created_utc": datetime.now(timezone.utc).isoformat(),
               "evaluation_unit": "slice", "selection_rule": SELECTION_RULE,
               "target_accuracy": args.target_accuracy, "minimum_coverage": args.minimum_coverage,
               "validation_cases": len(rows), "validation_patients": len({r['patient_id'] for r in rows}),
               "split_sha256": audit["split_sha256"], "source_sha256": file_hash(Path(__file__)),
               "verification_code_sha256": file_hash(Path(__file__).with_name("compare_validation.py")), "models": models}
+    result["inputs"] = {key: str(value.resolve()) if isinstance(value, Path) else value
+                        for key, value in vars(args).items()}
+    reproduce = [str(Path(__file__).resolve()), "--cnn-run", str(args.cnn_run.resolve()),
+                 "--convnext-run", str(args.convnext_run.resolve()), "--splits", str(args.splits.resolve()),
+                 "--target-accuracy", str(args.target_accuracy), "--minimum-coverage", str(args.minimum_coverage),
+                 "--experiment-status", args.experiment_status, "--output",
+                 str(args.output.resolve().with_name(args.output.name + "_recheck"))]
+    for option, value in (("--cnn-evaluation", args.cnn_evaluation),
+                          ("--convnext-evaluation", args.convnext_evaluation), ("--data-root", args.data_root)):
+        if value is not None:
+            reproduce.extend([option, str(value.resolve())])
+    result["reproduce_command"] = "py -3.13 " + " ".join("'" + item.replace("'", "''") + "'" for item in reproduce)
     args.output.mkdir(parents=True, exist_ok=False)
     save_plots(args.output, models, args.target_accuracy, args.minimum_coverage, args.data_root)
     policies = {k: v for k, v in result.items() if k != "models"}
