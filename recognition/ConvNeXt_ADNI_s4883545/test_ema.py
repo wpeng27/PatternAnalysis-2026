@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from modules import ModelEMA, checkpoint_weight_kind
 from train import parse_args, run_epoch
+from training_state import WarmupCosine
 
 
 class EMATests(unittest.TestCase):
@@ -74,17 +75,22 @@ class EMATests(unittest.TestCase):
         ema = ModelEMA(model, 0.5)
         original = deepcopy(model.state_dict())
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        scheduler = WarmupCosine(optimizer, total_steps=6, warmup_steps=2)
         loader = DataLoader(TensorDataset(torch.tensor([[1., 2.], [3., 1.]]), torch.tensor([0, 1])), batch_size=2)
         with redirect_stdout(io.StringIO()):
-            skipped = run_epoch(model, loader, torch.device("cpu"), optimizer, FakeScaler(True), ema=ema)
+            skipped = run_epoch(model, loader, torch.device("cpu"), optimizer, FakeScaler(True), ema=ema,
+                                step_scheduler=scheduler)
         self.assertEqual(skipped['amp_skipped_updates'], 1)
         self.assertEqual(ema.updates, 0)
+        self.assertEqual(scheduler.completed_updates, 0)
         for k, v in original.items():
             self.assertTrue(torch.equal(v, ema.model.state_dict()[k]))
         with redirect_stdout(io.StringIO()):
-            successful = run_epoch(model, loader, torch.device("cpu"), optimizer, FakeScaler(False), ema=ema)
+            successful = run_epoch(model, loader, torch.device("cpu"), optimizer, FakeScaler(False), ema=ema,
+                                   step_scheduler=scheduler)
         self.assertEqual(successful['optimizer_steps'], 1)
         self.assertEqual(ema.updates, 1)
+        self.assertEqual(scheduler.completed_updates, 1)
         for k, v in original.items():
             self.assertTrue(torch.allclose(ema.model.state_dict()[k], 0.5*v + 0.5*model.state_dict()[k]))
 

@@ -83,7 +83,7 @@ class ResumeTests(unittest.TestCase):
         save_splits(self.splits, rows, report)
 
     def run_training(self, name, epochs, resume=None, input_scaling="unit", augmentation="none",
-                     weight_decay_policy="all", ema_decay=None):
+                     weight_decay_policy="all", ema_decay=None, schedule_epochs=None, warmup_epochs=1):
         options = ["--data-root", str(self.root), "--splits", str(self.splits), "--output", str(self.base / name),
                    "--device", "cpu", "--workers", "0", "--threads", "2", "--batch-size", "2",
                    "--epochs", str(epochs), "--lr-patience", "0", "--no-amp", "--input-scaling", input_scaling,
@@ -92,6 +92,9 @@ class ResumeTests(unittest.TestCase):
             options.extend(["--resume", str(resume)])
         if ema_decay is not None:
             options.extend(["--ema", "--ema-decay", str(ema_decay)])
+        if schedule_epochs is not None:
+            options.extend(["--lr-schedule", "warmup_cosine", "--schedule-epochs", str(schedule_epochs),
+                            "--warmup-epochs", str(warmup_epochs)])
         with redirect_stdout(io.StringIO()):
             train(parse_args(options))
         return torch.load(self.base / name / "last.pt", map_location="cpu", weights_only=True)
@@ -204,6 +207,41 @@ class ResumeTests(unittest.TestCase):
         rows, audit = load_splits(self.splits)
         verified, _ = verify_run(self.base / "ema_resumed", self.base / "ema_evaluation", "small_cnn", rows['val'], audit)
         self.assertEqual(verified['settings']['evaluation_weights'], 'ema')
+
+    def test_cosine_ema_resume_crosses_warmup_and_matches_continuous(self):
+        opts = dict(ema_decay=0.9, weight_decay_policy="exclude_1d_bias", schedule_epochs=4)
+        continuous = self.run_training("cosine_continuous", 4, **opts)
+        self.run_training("cosine_first", 1, **opts)
+        resumed = self.run_training("cosine_resumed", 4, self.base / "cosine_first/last.pt", **opts)
+        for key in ("model_state_dict", "training_model_state_dict", "ema_updates", "optimizer_state_dict",
+                    "scheduler_state_dict", "scaler_state_dict", "random_state", "selection_state"):
+            self.assert_nested_equal(continuous[key], resumed[key])
+        for a, b in zip(continuous['history'], resumed['history']):
+            for key in ('learning_rate', 'next_learning_rate', 'scheduler_updates'):
+                self.assertEqual(a[key], b[key])
+            self.assertEqual(a['val']['loss'], b['val']['loss'])
+        self.assertEqual(resumed['scheduler_state_dict']['completed_updates'], 4)
+        self.assertEqual(resumed['history'][0]['learning_rate'], 1e-5)
+        self.assertEqual(resumed['history'][-1]['learning_rate'], 1e-6)
+        for name, changes in (('cosine_horizon', {'schedule_epochs': 5}),
+                              ('cosine_warmup', {'warmup_epochs': 2}),
+                              ('cosine_disabled', {'schedule_epochs': None})):
+            with self.assertRaisesRegex(ValueError, 'schedule'):
+                self.run_training(name, 4, self.base / 'cosine_first/last.pt', **(opts | changes))
+            self.assertFalse((self.base/name).exists())
+        from train import evaluate
+        from compare_validation import verify_run
+        from dataset import load_splits
+        args = parse_args(['--mode','evaluate','--checkpoint',str(self.base/'cosine_resumed/best.pt'),
+                           '--data-root',str(self.root),'--splits',str(self.splits),'--device','cpu',
+                           '--batch-size','2','--threads','2','--workers','0','--save-predictions',
+                           '--output',str(self.base/'cosine_evaluation')])
+        with redirect_stdout(io.StringIO()):
+            result = evaluate(args)
+        rows, audit = load_splits(self.splits)
+        verified, _ = verify_run(self.base/'cosine_resumed', self.base/'cosine_evaluation', 'small_cnn', rows['val'], audit)
+        self.assertEqual(result['evaluation_weights'], 'ema')
+        self.assertEqual(verified['settings']['scheduler_settings']['name'], 'WarmupCosine')
 
 
 if __name__ == "__main__":

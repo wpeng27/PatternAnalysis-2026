@@ -29,11 +29,13 @@ if __package__:
     from .modules import MODEL_NAMES, build_model, weight_decay_groups, ModelEMA, checkpoint_weight_kind
     from .metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from .training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
+    from .training_state import WarmupCosine, verify_cosine_checkpoint
 else:
     from dataset import ADNIDataset, AUGMENTATION_SETTINGS, CLASS_TO_INDEX, IMAGE_SIZE, load_splits, sha256
     from modules import MODEL_NAMES, build_model, weight_decay_groups, ModelEMA, checkpoint_weight_kind
     from metrics import classification_metrics, aggregate_patients, SELECTION_RULE
     from training_state import capture_random_state, restore_random_state, save_checkpoint, write_json, update_selection
+    from training_state import WarmupCosine, verify_cosine_checkpoint
 
 PREPROCESSING = "Pillow L, bilinear 224x224, float32 /255, repeat three channels"
 PREPROCESSING_BY_SCALING = {
@@ -103,7 +105,8 @@ def seed_worker(worker_id: int) -> None:
 
 
 def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, phase=None,
-              patient_rows=None, include_predictions=False, log_file=None, amp_dtype=None, ema=None) -> dict:
+              patient_rows=None, include_predictions=False, log_file=None, amp_dtype=None, ema=None,
+              step_scheduler=None) -> dict:
     """Sample-weighted loss and accuracy, including the final partial batch."""
     import torch
     from torch import nn
@@ -146,8 +149,11 @@ def run_epoch(model, loader, device, optimizer=None, scaler=None, amp=False, pha
                 scaler.update()
                 if scaler.get_scale() < previous_scale:
                     skipped_updates += 1
-                elif ema is not None:
-                    ema.update(model)
+                else:
+                    if ema is not None:
+                        ema.update(model)
+                    if step_scheduler is not None:
+                        step_scheduler.step()
             count = labels.numel()
             samples += count
             total_loss += loss.item() * count
@@ -256,9 +262,17 @@ def train(args) -> None:
     if amp and amp_dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
         raise ValueError("This CUDA device does not support bfloat16 AMP")
     scaler = torch.amp.GradScaler("cuda", enabled=amp and amp_dtype == torch.float16)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience,
-        threshold=args.min_delta, threshold_mode="abs", min_lr=1e-6)
+    if args.lr_schedule == "warmup_cosine":
+        scheduler = WarmupCosine(optimizer, args.schedule_epochs * len(loaders["train"]),
+                                 args.warmup_epochs * len(loaders["train"]))
+        scheduler_settings = dict(scheduler.settings)
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience,
+            threshold=args.min_delta, threshold_mode="abs", min_lr=1e-6)
+        scheduler_settings = {"name": "ReduceLROnPlateau", "metric": "val.loss", "mode": "min",
+                              "factor": args.lr_factor, "patience": args.lr_patience,
+                              "threshold": args.min_delta, "threshold_mode": "abs", "min_lr": 1e-6}
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config.update({"model": args.model, "pretrained": False, "effective_amp": amp,
                    "class_to_index": CLASS_TO_INDEX, "parameter_count": sum(p.numel() for p in model.parameters()),
@@ -287,9 +301,7 @@ def train(args) -> None:
                                           "eps": 1e-8, "parameter_groups":
                                           "All parameters, including biases and normalization" if args.weight_decay_policy == "all"
                                           else "No decay for biases and 1D parameters, configured decay for remaining weights"},
-                   "scheduler_settings": {"name": "ReduceLROnPlateau", "metric": "val.loss", "mode": "min",
-                                          "factor": args.lr_factor, "patience": args.lr_patience,
-                                          "threshold": args.min_delta, "threshold_mode": "abs", "min_lr": 1e-6},
+                   "scheduler_settings": scheduler_settings,
                    "regularization_settings": {"weight_decay": args.weight_decay, "drop_path_rate": args.drop_path_rate,
                                                "weight_decay_policy": args.weight_decay_policy,
                                                "classifier_dropout": 0.2 if args.model == "small_cnn" else 0.0,
@@ -298,7 +310,8 @@ def train(args) -> None:
                    "model_settings": {"architecture": str(model), "input_shape": [3, IMAGE_SIZE, IMAGE_SIZE], "num_classes": 2},
                    "selection_metric": "val.loss", "selection_unit": "slice",
                    "early_stopping_patience": args.patience, "early_stopping_min_delta": args.min_delta,
-                   "scheduler": "ReduceLROnPlateau on validation slice cross-entropy",
+                   "scheduler": "Linear warmup and cosine decay per successful optimizer update" if args.lr_schedule == "warmup_cosine"
+                                else "ReduceLROnPlateau on validation slice cross-entropy",
                    "scheduler_factor": args.lr_factor, "scheduler_patience": args.lr_patience,
                    "precision": ("CUDA float16 autocast with GradScaler" if args.amp_dtype == "float16"
                                  else "CUDA bfloat16 autocast without gradient scaling") if amp else "float32",
@@ -317,6 +330,12 @@ def train(args) -> None:
             raise ValueError("This checkpoint lacks complete resume state. Old checkpoints remain evaluation-only.")
         previous = saved["config"]
         checkpoint_weight_kind(saved)
+        if previous.get("lr_schedule", "plateau") != args.lr_schedule:
+            raise ValueError("Resume setting differs from the original run: lr_schedule")
+        if args.lr_schedule == "warmup_cosine":
+            if any(previous.get(k) != config[k] for k in ("schedule_epochs", "warmup_epochs", "scheduler_settings")):
+                raise ValueError("Resume cosine schedule settings/horizon differ from original run")
+            verify_cosine_checkpoint(saved, config)
         if previous.get("ema", False) != args.ema or (args.ema and previous.get("ema_decay") != args.ema_decay):
             raise ValueError("Resume setting differs from the original run: ema/ema_decay")
         if previous.get("weight_decay_policy", "all") != args.weight_decay_policy:
@@ -380,17 +399,20 @@ def train(args) -> None:
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
             training = run_epoch(model, loaders["train"], device, optimizer, scaler, amp, log_file=log_file,
-                                 amp_dtype=amp_dtype, ema=ema)
+                                 amp_dtype=amp_dtype, ema=ema,
+                                 step_scheduler=scheduler if args.lr_schedule == "warmup_cosine" else None)
             allocated = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
             reserved = torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
             evaluation_model = ema.model if ema is not None else model
             validation = run_epoch(evaluation_model, loaders["val"], device, amp=amp,
                                    patient_rows=splits["val"], log_file=log_file, amp_dtype=amp_dtype)
-            scheduler.step(validation["loss"])
+            if args.lr_schedule == "plateau":
+                scheduler.step(validation["loss"])
             improved = update_selection(selection, validation["loss"], epoch, args.patience, args.min_delta)
             record = {"epoch": epoch, "train": training, "val": validation,
                       "validation_weights": config["validation_weights"],
                       "ema_updates": ema.updates if ema is not None else 0,
+                      "scheduler_updates": scheduler.completed_updates if args.lr_schedule == "warmup_cosine" else None,
                       "learning_rate": current_lr, "next_learning_rate": optimizer.param_groups[0]["lr"],
                       "epoch_seconds": time.perf_counter() - epoch_started,
                       "peak_training_allocated_bytes": allocated, "peak_training_reserved_bytes": reserved,
@@ -517,6 +539,12 @@ def parse_args(argv=None):
     parser.add_argument("--min-delta", type=float, default=0.0, help="Required absolute validation-loss decrease for selection")
     parser.add_argument("--lr-patience", type=int, default=2, help="ReduceLROnPlateau patience")
     parser.add_argument("--lr-factor", type=float, default=0.5, help="Learning-rate multiplier on a plateau")
+    parser.add_argument("--lr-schedule", choices=("plateau", "warmup_cosine"), default="plateau",
+                        help="Plateau after validation, or warmup/cosine per successful optimizer update")
+    parser.add_argument("--warmup-epochs", type=int, default=None,
+                        help="Cosine only: warmup duration in training-loader epochs (default 3)")
+    parser.add_argument("--schedule-epochs", type=int, default=None,
+                        help="Cosine only: fixed total LR horizon (defaults to --epochs), preserve on resume")
     parser.add_argument("--batch-size", type=int, default=32, help="Training/evaluation batch size")
     parser.add_argument("--lr", "--learning-rate", dest="lr", type=float, default=1e-3, help="AdamW learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
@@ -542,6 +570,19 @@ def parse_args(argv=None):
     parser.add_argument("--eval-split", choices=("val", "test"), help="Evaluate mode only (default: val)")
     parser.add_argument("--save-predictions", action="store_true", help="Save per-slice P(AD) in evaluate mode")
     args = parser.parse_args(argv)
+    if args.lr_schedule == "warmup_cosine":
+        if args.mode != "train":
+            parser.error("Learning-rate schedules are training-only")
+        args.warmup_epochs = 3 if args.warmup_epochs is None else args.warmup_epochs
+        args.schedule_epochs = args.epochs if args.schedule_epochs is None else args.schedule_epochs
+        if args.warmup_epochs < 0 or args.schedule_epochs - args.warmup_epochs < 2:
+            parser.error("Cosine horizon needs at least two epochs after nonnegative warmup")
+        if args.epochs > args.schedule_epochs:
+            parser.error("Training epochs cannot exceed the fixed cosine horizon")
+        if args.lr < 1e-6:
+            parser.error("Cosine peak LR must be at least its minimum LR of 1e-6")
+    elif args.warmup_epochs is not None or args.schedule_epochs is not None:
+        parser.error("--warmup-epochs and --schedule-epochs require --lr-schedule warmup_cosine")
     if args.mode == "evaluate" and (args.ema or args.ema_decay is not None):
         parser.error("EMA evaluation weights are inherited from the checkpoint, omit --ema and --ema-decay")
     if args.ema_decay is not None and not args.ema:

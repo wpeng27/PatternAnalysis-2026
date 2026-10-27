@@ -140,6 +140,18 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
     verify_optimizer_groups(checkpoint, config, selected["next_learning_rate"])
     group_settings = [{k: v for k, v in group.items() if k != "params"} for group in groups]
     scheduler = checkpoint["scheduler_state_dict"]
+    schedule_kind = config.get("lr_schedule", "plateau")
+    if checkpoint["config"].get("lr_schedule", "plateau") != schedule_kind:
+        raise ValueError("Checkpoint scheduler identity mismatch")
+    if schedule_kind == "warmup_cosine":
+        if __package__:
+            from .training_state import verify_cosine_checkpoint
+        else:
+            from training_state import verify_cosine_checkpoint
+        scheduler_settings = verify_cosine_checkpoint(checkpoint, config)
+    else:
+        scheduler_settings = {key: scheduler[key] for key in
+                              ("factor", "patience", "mode", "threshold", "threshold_mode", "min_lrs")}
     settings = {key: config[key] for key in ("pretrained", "parameter_count", "batch_size", "lr", "weight_decay",
                  "seed", "workers", "threads", "precision", "preprocessing", "augmentation", "model_settings",
                  "early_stopping_patience", "early_stopping_min_delta", "packages", "scheduler")}
@@ -150,8 +162,7 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
                     model_kwargs=config.get("model_kwargs"),
                     optimizer_config=config.get("optimizer_settings"),
                     selected_checkpoint_optimizer_groups=group_settings,
-                    scheduler_settings={key: scheduler[key] for key in
-                        ("factor", "patience", "mode", "threshold", "threshold_mode", "min_lrs")},
+                    scheduler_settings=scheduler_settings,
                     augmentation_settings=config.get("augmentation_settings", {"name": config["augmentation"]}),
                     evaluation_batch_size=evaluation["batch_size"],
                     evaluation_amp_dtype=evaluation.get("amp_dtype", "not recorded, FP16 documented in run precision"),
