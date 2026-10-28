@@ -22,12 +22,12 @@ import numpy as np
 if __package__:
     from .train import seed_everything, PREPROCESSING_BY_SCALING
     from .dataset import ADNIDataset, load_splits
-    from .modules import build_model
+    from .modules import build_model, checkpoint_weight_kind
     from .compare_validation import verify_run, file_hash
 else:
     from train import seed_everything, PREPROCESSING_BY_SCALING
     from dataset import ADNIDataset, load_splits
-    from modules import build_model
+    from modules import build_model, checkpoint_weight_kind
     from compare_validation import verify_run, file_hash
 
 
@@ -116,6 +116,23 @@ def measure(model, dataset, gpu_batches, batch_size, precision, scope, device,
             "repeat_summaries": groups, "raw_batch_ms": samples}
 
 
+def reproduction_command(settings):
+    """PowerShell command preserving the actual models and all timing settings."""
+    def quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    command = ["py", "-3.13", quote(Path(__file__).resolve())]
+    for name in ("cnn_run", "convnext_run", "splits", "data_root", "output"):
+        path = Path(settings[name]).resolve()
+        if name == "output":
+            path = path.with_name(path.name + "_recheck")
+        command.extend(("--" + name.replace("_", "-"), quote(path)))
+    command.extend(("--batch-sizes", *(str(value) for value in settings["batch_sizes"])))
+    for name in ("samples", "warmup", "iterations", "repeats", "seed", "threads"):
+        command.extend(("--" + name, str(settings[name])))
+    return " ".join(command)
+
+
 def write_report(output, result):
     lines = ["# Measured inference latency", "",
              f"Completed {result['finished_utc']} (UTC). GPU: {result['environment']['gpu']}. "
@@ -144,6 +161,14 @@ def write_report(output, result):
              "AMP is benchmarked alongside common FP32. FP32 timings are a comparison, not a replacement evaluation "
              "or a change to frozen confidence thresholds.", "",
              "Synchronized timing follows [PyTorch 2.9 CUDA guidance](https://docs.pytorch.org/docs/2.9/notes/cuda.html#asynchronous-execution).", "",
+             "## Checkpoint identities", "",
+             "| Model | Evaluation weights | Selected epoch | Checkpoint SHA-256 |",
+             "|---|---|---:|---|"]
+    for model in result["models"]:
+        lines.append(f"| {model['model']} | {model['evaluation_weights']} | {model['selected_epoch']} | "
+                     f"`{model['checkpoint_sha256']}` |")
+    lines += ["", "EMA checkpoints are timed using their stored evaluation weights, not the online training weights. "
+              "EMA averaging is a training operation and is not performed during inference.", "",
              "## Results", "",
              "| Model | Precision | Batch | Scope | Median batch ms | p95 batch ms | Mean ms/image | Images/s |",
              "|---|---|---:|---|---:|---:|---:|---:|"]
@@ -151,7 +176,7 @@ def write_report(output, result):
         for measurement in model["measurements"]:
             s = measurement["summary"]
             scope = "Forward" if measurement["scope"] == "gpu_resident_forward" else "JPEG to probabilities"
-            lines.append(f"| {model['model']} | {measurement['precision']} | {s['batch_size']} | {scope} | "
+            lines.append(f"| {model['model']} ({model['evaluation_weights']}) | {measurement['precision']} | {s['batch_size']} | {scope} | "
                          f"{s['median_batch_ms']:.3f} | {s['p95_batch_ms']:.3f} | "
                          f"{s['amortized_ms_per_image']:.3f} | {s['images_per_second']:.1f} |")
     lines += ["", "Mean ms/image divides mean batch latency by batch size. At batch 16 it is amortized processing "
@@ -170,11 +195,7 @@ def write_report(output, result):
               "after each model are recorded, not continuous monitoring. Peak training memory and parameter-count "
               "measurements remain the previously recorded values.", "",
               "## Reproduce", "", "Run from the repository root with a fresh output directory:", "", "```powershell",
-              "$p = 'recognition/ConvNeXt_ADNI_s4883545'",
-              'py -3.13 "$p/benchmark_latency.py" --cnn-run "$p/artifacts/runs/baseline_small_cnn_20261023" '
-              '--convnext-run "$p/artifacts/runs/convnext_affine_continue30_20261024" '
-              '--splits "$p/artifacts/splits_seed42" --data-root ADNI/AD_NC '
-              '--output "$p/artifacts/latency_recheck"', "```", "",
+              result["reproduce_command"], "```", "",
               "Default batch sizes are 1 and 16, with 128 sampled slices, 20 warm-up batches, 100 timed batches "
               "and 3 repeats per setting. See latency.json for the exact executed arguments, timestamps, device/driver "
               "snapshots, source hashes, sample manifest identities, checkpoint provenance and raw timings."]
@@ -239,10 +260,13 @@ def main():
                                     "ad_slices": sum(r['label'] == 1 for r in rows),
                                     "paths": [r['path'] for r in rows]}, "models": []}
     args.output.mkdir(parents=True, exist_ok=False)
+    result["reproduce_command"] = reproduction_command(result["settings"])
+    (args.output / "latency.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     for run, name in ((args.cnn_run, "small_cnn"), (args.convnext_run, "convnext_tiny")):
         verified, _ = verify_run(run, run.with_name(run.name + "_validation"), name, splits["val"], audit)
         checkpoint = torch.load(run / "best.pt", weights_only=True, map_location="cpu")
         config = checkpoint["config"]
+        weight_kind = checkpoint_weight_kind(checkpoint)
         scaling = config.get("input_scaling", "unit")
         if config["preprocessing"] != PREPROCESSING_BY_SCALING[scaling]:
             raise ValueError("Unknown checkpoint preprocessing")
@@ -261,10 +285,14 @@ def main():
         if recorded_precision == "bfloat16" and not torch.cuda.is_bf16_supported():
             raise ValueError("Selected precision BF16 unsupported on this GPU")
         entry = {"model": name, "checkpoint_sha256": verified["checkpoint_sha256"],
+                 "checkpoint": str((run / "best.pt").resolve()), "evaluation_weights": weight_kind,
+                 "ema_decay": config.get("ema_decay") if weight_kind == "ema" else None,
+                 "model_kwargs": config.get("model_kwargs", {"drop_path_rate": 0.0}),
                  "selected_epoch": verified["selected_epoch"], "recorded_precision": recorded_precision,
                  "preprocessing": config["preprocessing"], "verification": verified["verified"],
                  "gpu_before": gpu_snapshot(), "measurements": []}
-        print(f"Benchmarking {name}, recorded precision {recorded_precision}", flush=True)
+        print(f"Benchmarking {name}, {weight_kind} weights, epoch {entry['selected_epoch']}, "
+              f"recorded precision {recorded_precision}", flush=True)
         for batch_size in args.batch_sizes:
             batches = list(gpu_pool.split(batch_size))
             for precision in dict.fromkeys((recorded_precision, "float32")):
