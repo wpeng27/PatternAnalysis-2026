@@ -249,6 +249,25 @@ def load_splits(directory: Path) -> tuple[dict[str, list[dict]], dict]:
     return splits, report
 
 
+def preprocess_image(raw: bytes, input_scaling: str = "unit", transform=None) -> torch.Tensor:
+    """Shared training/inference preprocessing from encoded image bytes.
+
+    Transform, when supplied by the training dataset, acts on the resized
+    grayscale image. Prediction uses no transform. All three output channels
+    contain identical grayscale data.
+    """
+    if input_scaling not in {"unit", "centered"}:
+        raise ValueError("input_scaling must be unit or centered")
+    with Image.open(io.BytesIO(raw)) as image:
+        gray = image.convert("L").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BILINEAR)
+        if transform is not None:
+            gray = transform(gray)
+        tensor = TF.pil_to_tensor(gray).to(dtype=torch.float32).div_(255.0)
+    if input_scaling == "centered":
+        tensor = tensor.mul(2).sub(1)
+    return tensor.repeat(3, 1, 1)
+
+
 class ADNIDataset(Dataset):
     """Float32 CHW tensors, bilinear 224x224 resize and three identical channels.
 
@@ -290,14 +309,7 @@ class ADNIDataset(Dataset):
         raw = path.read_bytes()
         if sha256(raw) != row["file_sha256"]:
             raise ValueError(f"Image changed since split audit: {row['path']}")
-        with Image.open(io.BytesIO(raw)) as image:
-            gray = image.convert("L").resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.BILINEAR)
-            if self.transform is not None:
-                gray = self.transform(gray)
-            tensor = TF.pil_to_tensor(gray).to(dtype=torch.float32).div_(255.0)
-        if self.input_scaling == "centered":
-            tensor = tensor.mul(2).sub(1)
-        return tensor.repeat(3, 1, 1), int(row["label"])
+        return preprocess_image(raw, self.input_scaling, self.transform), int(row["label"])
 
 
 def main() -> None:
