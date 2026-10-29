@@ -345,3 +345,6 @@ ADNI \| alzheimer’s disease neuroimaging initiative. (n.d.). ADNI. Retrieved O
 5. Convnext\_tiny — Torchvision 0.29 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext\_tiny.html](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext_tiny.html)
 6. ConvNeXt — Torchvision 0.28 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/0.28/models/convnext.html](https://docs.pytorch.org/vision/0.28/models/convnext.html)
 7. GeeksforGeeks. (2025, July 14). ConvNeXt. GeeksforGeeks. [https\://www\.geeksforgeeks.org/computer-vision/convnext/](https://www.geeksforgeeks.org/computer-vision/convnext/)
+8. Singh, V. (2026, March 24). Affine Transformation Explained: Properties and Applications. DataCamp. https://www.datacamp.com/tutorial/affine-transformation
+9. Himel Sarder. (2026, August 5). Exponential moving average (EMA) in deep learning: A complete user guide. Medium. https://himelsarder.medium.com/exponential-moving-average-ema-in-deep-learning-a-complete-user-guide-4766f95f7def
+10. 
