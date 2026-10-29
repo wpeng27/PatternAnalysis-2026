@@ -1,0 +1,31 @@
+{
+  "state": "verified_validation_confidence_analysis",
+  "evaluation_unit": "slice",
+  "experiment_status": "after_test_exposure",
+  "class_to_index": {
+    "NC": 0,
+    "AD": 1
+  },
+  "split_sha256": {
+    "train": "271807d405c7ed0398b066fce743c314044852068e80fed98b78a8bbcdbf1eb3",
+    "val": "aa454c72f6990f97ed416a5c0142b5cb16b6efb0a07af97908d8f581ab554e44",
+    "test": "c7dce436a130f76d9723d3be2c1c090d5f8f5d8f02cbe68b4dc0a824dfdea364"
+  },
+  "selection_rule": "Maximize validation slice coverage subject to accepted accuracy >= target and coverage >= minimum. Accept confidence >= threshold, include all ties. Choose the lowest threshold if coverage ties. No feasible threshold => no policy.",
+  "target_accuracy": 0.9,
+  "minimum_coverage": 0.5,
+  "models": [
+    {
+      "model": "small_cnn",
+      "status": "selected",
+      "threshold": 0.5,
+      "checkpoint_sha256": "722924cedcdd6afb053ed7967d04e1688e601b9f74909d6305d6af382e654fe5"
+    },
+    {
+      "model": "convnext_tiny",
+      "status": "selected",
+      "threshold": 0.5549529194831848,
+      "checkpoint_sha256": "c1e792929e2cc7511489fa7807c96c8e895a80645c1aa273f52f44e42c0096f3"
+    }
+  ]
+}
