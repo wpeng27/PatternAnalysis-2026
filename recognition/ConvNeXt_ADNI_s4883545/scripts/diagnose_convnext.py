@@ -5,24 +5,23 @@ weights, then measure initial gradients for two fixed input scalings. No
 optimizer update or performance claim is made by this diagnostic.
 """
 
-import argparse
+# Support direct script execution from any working directory.
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import PROJECT_ROOT
+
+import argparse
 
 import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision.models import convnext_tiny
 
-if __package__:
-    from .dataset import ADNIDataset, load_splits
-    from .modules import build_model
-    from .train import seed_everything
-    from .training_state import write_json
-else:
-    from dataset import ADNIDataset, load_splits
-    from modules import build_model
-    from train import seed_everything
-    from training_state import write_json
+from dataset import ADNIDataset, load_splits
+from modules import build_model
+from train import seed_everything
+from training_state import write_json
 
 
 def reference_state(state):
@@ -52,7 +51,7 @@ def reference_state(state):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path, required=True)
-    parser.add_argument('--splits', type=Path, default=Path(__file__).parent / 'artifacts/splits_seed42')
+    parser.add_argument('--splits', type=Path, default=PROJECT_ROOT / 'artifacts/splits_seed42')
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()

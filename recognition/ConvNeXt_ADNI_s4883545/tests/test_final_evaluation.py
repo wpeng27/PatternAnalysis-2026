@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from final_evaluation import verify_freeze, summarize_test, write_new_json
-from compare_validation import file_hash
+from scripts.final_evaluation import verify_freeze, summarize_test, write_new_json
+from scripts.compare_validation import file_hash
 from metrics import classification_metrics, aggregate_patients
 
 

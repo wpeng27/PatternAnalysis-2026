@@ -2,7 +2,7 @@
 import unittest
 import numpy as np
 from pathlib import Path
-from benchmark_latency import summarize, cyclic_indices, reproduction_command
+from scripts.benchmark_latency import summarize, cyclic_indices, reproduction_command
 
 
 class LatencyTests(unittest.TestCase):

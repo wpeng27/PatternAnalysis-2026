@@ -4,19 +4,18 @@ The budget projection uses measured epochs and is explicitly an estimate.
 Final reports require a completed run and separate best-checkpoint validation.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
-from pathlib import Path
 import statistics
 
-if __package__:
-    from .dataset import sha256
-    from .modules import build_model
-    from .training_state import write_json
-else:
-    from dataset import sha256
-    from modules import build_model
-    from training_state import write_json
+from dataset import sha256
+from modules import build_model
+from training_state import write_json
 
 
 def read_json(path):

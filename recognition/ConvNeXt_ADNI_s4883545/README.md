@@ -239,6 +239,27 @@ My recommendation is to preserve the current checkpoints, preprocessing and revi
 
 The required entry points are [modules.py](modules.py), [dataset.py](dataset.py), [train.py](train.py) and [predict.py](predict.py). Helper scripts provide metrics, training state, curves, comparison, confidence, diagnostics and latency. No model download is embedded in the code.
 
+Project layout:
+
+```text
+ConvNeXt_ADNI_s4883545/
+|-- README.md                 # Report and reproducibility commands
+|-- modules.py                # CNN, ConvNeXt and EMA model code
+|-- dataset.py                # Patient splits, audit and image loading
+|-- train.py                  # Training, resume and evaluation CLI
+|-- predict.py                # Checkpoint prediction and review decisions
+|-- metrics.py                # Shared metric definitions
+|-- training_state.py         # Checkpoint and scheduler state
+|-- LICENSE-ConvNeXt.txt       # Implementation attribution
+|-- scripts/                  # Analysis, reporting and model checks
+|-- tests/                    # Automated checks using synthetic fixtures
+`-- report/                   # Published figures and compact evidence
+```
+
+The required entry points stay at the project root. Supporting commands are in
+[`scripts/`](scripts/), and automated checks are in [`tests/`](tests/). The dataset,
+checkpoints and generated `artifacts/` remain outside the published files.
+
 Recorded environment: Windows 11, Python **3.13.3**, PyTorch **2.9.0+cu126**, torchvision **0.24.0+cu126**, Pillow **11.3.0**, NumPy **2.3.3**, scikit-learn **1.8.0**, Matplotlib **3.10.6**, CUDA runtime **12.6** and RTX 4070. Run all commands below from the **repository root**. Matching [PyTorch installation commands](https://pytorch.org/get-started/previous-versions/) are:
 
 ```powershell
@@ -276,10 +297,10 @@ Evaluate the reloaded checkpoints on validation, produce curves and select a new
 ```powershell
 py -3.13 "$p/train.py" --mode evaluate --model small_cnn --checkpoint "$cnn/best.pt" --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --eval-split val --batch-size 32 --device cuda --workers 0 --save-predictions --output "${cnn}_validation"
 py -3.13 "$p/train.py" --mode evaluate --model convnext_tiny --checkpoint "$ema/best.pt" --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --eval-split val --batch-size 16 --device cuda --workers 0 --save-predictions --output "${ema}_validation"
-py -3.13 "$p/report_run.py" --run $cnn --validation "${cnn}_validation/evaluation.json"
-py -3.13 "$p/report_run.py" --run $ema --validation "${ema}_validation/evaluation.json"
-py -3.13 "$p/compare_validation.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --output "$p/artifacts/comparison_reproduction"
-py -3.13 "$p/analyze_confidence.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --experiment-status after_test_exposure --output "$p/artifacts/confidence_reproduction"
+py -3.13 "$p/scripts/report_run.py" --run $cnn --validation "${cnn}_validation/evaluation.json"
+py -3.13 "$p/scripts/report_run.py" --run $ema --validation "${ema}_validation/evaluation.json"
+py -3.13 "$p/scripts/compare_validation.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --output "$p/artifacts/comparison_reproduction"
+py -3.13 "$p/scripts/analyze_confidence.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --experiment-status after_test_exposure --output "$p/artifacts/confidence_reproduction"
 ```
 
 The existing test set remains exposed even for these new runs. To explicitly reproduce test inference after fixing a configuration, change `--eval-split val` to `--eval-split test` and choose a fresh output directory. Such results remain exploratory. No test inference was executed when preparing this report.
@@ -293,8 +314,8 @@ py -3.13 "$p/predict.py" --checkpoint $best --data-root ADNI/AD_NC --splits "$p/
 # Replace this path with an image to predict individually
 py -3.13 "$p/predict.py" --checkpoint $best --images path/to/image.jpeg --device cpu --output "$p/artifacts/single_image_reproduction"
 
-py -3.13 "$p/benchmark_latency.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --data-root ADNI/AD_NC --output "$p/artifacts/latency_reproduction"
-py -3.13 -m unittest discover -s $p -p 'test_*.py'
+py -3.13 "$p/scripts/benchmark_latency.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --data-root ADNI/AD_NC --output "$p/artifacts/latency_reproduction"
+py -3.13 -m unittest discover -s "$p/tests" -t $p -p 'test_*.py'
 ```
 
 Prediction restores architecture, EMA identity, preprocessing and CUDA precision. CPU uses FP32, which can slightly change probabilities. Outputs are `predictions.csv`, `prediction.json` and `demo.png`. Individual images have unknown ground truth, with no labels inferred from folders. `--limit` selects evenly spaced manifest positions and labels metrics as a demonstration subset. Omit it for complete validation metrics. A full audited split additionally reports patient aggregation. Review policies must match checkpoint and split hashes. All output directories must be fresh.

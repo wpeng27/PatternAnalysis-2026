@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from report_run import budget_report, completed_run
+from scripts.report_run import budget_report, completed_run
 
 
 class ReportTests(unittest.TestCase):
@@ -14,8 +14,8 @@ class ReportTests(unittest.TestCase):
         config = {"device_name": "fixture", "batch_size": 32, "precision": "fixture",
                   "workers": 0, "early_stopping_patience": 5}
         status = {"start_epoch": 1, "process_seconds": 30, "process_startup_seconds": 2}
-        with patch("report_run.completed_run", return_value=(history, config, status)), \
-             patch("report_run.write_json"):
+        with patch("scripts.report_run.completed_run", return_value=(history, config, status)), \
+             patch("scripts.report_run.write_json"):
             report = budget_report(Path("fixture"), max_epochs=5)
         self.assertEqual(report["warm_epoch_mean_seconds"], 7)
         self.assertEqual(report["estimated_total_seconds_including_trial"], 48)
@@ -25,7 +25,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("Estimates", report["projection_caveat"])
 
     def test_running_job_cannot_be_reported_as_complete(self):
-        with patch("report_run.read_json", return_value={"state": "running"}):
+        with patch("scripts.report_run.read_json", return_value={"state": "running"}):
             with self.assertRaisesRegex(ValueError, "not complete"):
                 completed_run(Path("fixture"))
 

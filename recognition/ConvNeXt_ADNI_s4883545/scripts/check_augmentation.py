@@ -5,21 +5,20 @@ This is a functional smoke check, not a model performance experiment. It reads
 No checkpoint is produced and no resulting weights are used by the full run.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import json
-from pathlib import Path
 import random
 
 import torch
 
-if __package__:
-    from .dataset import ADNIDataset, AUGMENTATION_SETTINGS, load_splits
-    from .modules import build_model
-    from .train import make_loader, parse_args, run_epoch, seed_everything
-else:
-    from dataset import ADNIDataset, AUGMENTATION_SETTINGS, load_splits
-    from modules import build_model
-    from train import make_loader, parse_args, run_epoch, seed_everything
+from dataset import ADNIDataset, AUGMENTATION_SETTINGS, load_splits
+from modules import build_model
+from train import make_loader, parse_args, run_epoch, seed_everything
 
 
 def main():

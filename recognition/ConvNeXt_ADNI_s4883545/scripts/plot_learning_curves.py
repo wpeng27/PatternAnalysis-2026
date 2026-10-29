@@ -6,11 +6,15 @@ whereas validation is measured once after each epoch. Loss axes use a labelled
 log scale to retain large validation spikes without hiding smaller losses.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")

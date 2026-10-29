@@ -6,7 +6,7 @@ import unittest
 import torch
 from torch import nn
 
-from compare_validation import verify_optimizer_groups
+from scripts.compare_validation import verify_optimizer_groups
 from modules import build_model, weight_decay_groups
 from train import parse_args
 

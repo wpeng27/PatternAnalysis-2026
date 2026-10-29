@@ -1,7 +1,7 @@
 """Known-input checks for perturbation semantics and diagnostic counts."""
 import unittest
 import torch
-from analyze_sensitivity import perturb, compare_probabilities, routing_results
+from scripts.analyze_sensitivity import perturb, compare_probabilities, routing_results
 
 
 class SensitivityTests(unittest.TestCase):

@@ -193,7 +193,7 @@ class ResumeTests(unittest.TestCase):
                                   weight_decay_policy="exclude_1d_bias")
             self.assertFalse((self.base / name).exists())
         from train import evaluate
-        from compare_validation import verify_run
+        from scripts.compare_validation import verify_run
         from dataset import load_splits
         best = torch.load(self.base / "ema_resumed/best.pt", map_location="cpu", weights_only=True)
         args = parse_args(["--mode", "evaluate", "--checkpoint", str(self.base / "ema_resumed/best.pt"),
@@ -230,7 +230,7 @@ class ResumeTests(unittest.TestCase):
                 self.run_training(name, 4, self.base / 'cosine_first/last.pt', **(opts | changes))
             self.assertFalse((self.base/name).exists())
         from train import evaluate
-        from compare_validation import verify_run
+        from scripts.compare_validation import verify_run
         from dataset import load_splits
         args = parse_args(['--mode','evaluate','--checkpoint',str(self.base/'cosine_resumed/best.pt'),
                            '--data-root',str(self.root),'--splits',str(self.splits),'--device','cpu',

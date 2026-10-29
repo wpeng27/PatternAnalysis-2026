@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from compare_validation import align_predictions, paired_counts, require_metrics_match
+from scripts.compare_validation import align_predictions, paired_counts, require_metrics_match
 from metrics import classification_metrics
 
 

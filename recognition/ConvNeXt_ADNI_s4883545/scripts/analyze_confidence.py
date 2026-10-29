@@ -7,22 +7,23 @@ No temperature scaling, inference, training or test evaluation is performed.
 AI-assisted implementation, verified with hand-calculated and boundary tests.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 from collections import defaultdict
 import csv
 import json
-from pathlib import Path
 from datetime import datetime, timezone
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
-if __package__:
-    from .compare_validation import verify_run, file_hash
-    from .dataset import load_splits
-else:
-    from compare_validation import verify_run, file_hash
-    from dataset import load_splits
+from scripts.compare_validation import verify_run, file_hash
+from dataset import load_splits
 
 
 SELECTION_RULE = ("Maximize validation slice coverage subject to accepted accuracy >= target "
@@ -410,7 +411,7 @@ def main():
               "target_accuracy": args.target_accuracy, "minimum_coverage": args.minimum_coverage,
               "validation_cases": len(rows), "validation_patients": len({r['patient_id'] for r in rows}),
               "split_sha256": audit["split_sha256"], "source_sha256": file_hash(Path(__file__)),
-              "verification_code_sha256": file_hash(Path(__file__).with_name("compare_validation.py")), "models": models}
+              "verification_code_sha256": file_hash(source_path("compare_validation.py")), "models": models}
     result["inputs"] = {key: str(value.resolve()) if isinstance(value, Path) else value
                         for key, value in vars(args).items()}
     reproduce = [str(Path(__file__).resolve()), "--cnn-run", str(args.cnn_run.resolve()),

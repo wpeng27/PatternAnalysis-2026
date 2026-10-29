@@ -3,12 +3,18 @@
 Diagnostic variants are fixed before inference. They do not replace the saved
 preprocessing, checkpoint, decision boundary or review policy.
 """
+
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 from datetime import datetime, timezone
 import csv
 import io
 import json
-from pathlib import Path
 import time
 
 import numpy as np
@@ -16,9 +22,9 @@ from PIL import Image
 from train import seed_everything, PREPROCESSING_BY_SCALING
 from dataset import ADNIDataset, load_splits
 from modules import build_model, checkpoint_weight_kind
-from compare_validation import verify_run, file_hash
-from benchmark_latency import state_hash
-from analyze_sensitivity import compare_probabilities, infer
+from scripts.compare_validation import verify_run, file_hash
+from scripts.benchmark_latency import state_hash
+from scripts.analyze_sensitivity import compare_probabilities, infer
 import torch
 import torch.nn.functional as F
 
@@ -135,7 +141,7 @@ def main():
           'rows':len(rows),'patients':len({r['patient_id'] for r in rows}),'case_paths':[c['path'] for c in cases],
           'test_evaluated':False,'training_performed':False,'thresholds':thresholds,'split_sha256':audit['split_sha256'],
           'analysis_sha256':file_hash(args.analysis),'case_evidence_sha256':file_hash(args.cases),
-          'source_sha256':{name:file_hash(Path(__file__).with_name(name)) for name in
+          'source_sha256':{name:file_hash(source_path(name)) for name in
                            ('analyze_failure_reasons.py','analyze_sensitivity.py','dataset.py','modules.py','metrics.py','compare_validation.py')},
           'models':{k:{f:v[f] for f in ('run','checkpoint_sha256','prediction_sha256','selected_epoch')} for k,v in verified.items()},
           'seed':42,'gpu':torch.cuda.get_device_name(),'torch':str(torch.__version__)}

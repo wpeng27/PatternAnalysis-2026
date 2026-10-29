@@ -2,7 +2,7 @@ import unittest
 import numpy as np
 from PIL import Image
 import torch
-from analyze_failure_reasons import tensor_variant, source_variant, context_predictions
+from scripts.analyze_failure_reasons import tensor_variant, source_variant, context_predictions
 
 
 class FailureReasonsTests(unittest.TestCase):

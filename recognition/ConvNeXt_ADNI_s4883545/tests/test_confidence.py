@@ -3,7 +3,7 @@
 import unittest
 import numpy as np
 
-from analyze_confidence import (coverage_curve, select_threshold, threshold_summary,
+from scripts.analyze_confidence import (coverage_curve, select_threshold, threshold_summary,
                                 calibration_summary, clustered_intervals, ranked_errors)
 
 

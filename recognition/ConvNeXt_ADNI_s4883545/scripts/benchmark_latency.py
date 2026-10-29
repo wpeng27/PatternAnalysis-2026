@@ -7,10 +7,15 @@ No training, test evaluation, compilation or changes to selected checkpoints.
 AI-assisted implementation with explicit timing and statistical checks.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import platform
 import subprocess
 import time
@@ -19,16 +24,10 @@ from datetime import datetime, timezone
 import numpy as np
 
 # train sets CUBLAS_WORKSPACE_CONFIG before CUDA initialization.
-if __package__:
-    from .train import seed_everything, PREPROCESSING_BY_SCALING
-    from .dataset import ADNIDataset, load_splits
-    from .modules import build_model, checkpoint_weight_kind
-    from .compare_validation import verify_run, file_hash
-else:
-    from train import seed_everything, PREPROCESSING_BY_SCALING
-    from dataset import ADNIDataset, load_splits
-    from modules import build_model, checkpoint_weight_kind
-    from compare_validation import verify_run, file_hash
+from train import seed_everything, PREPROCESSING_BY_SCALING
+from dataset import ADNIDataset, load_splits
+from modules import build_model, checkpoint_weight_kind
+from scripts.compare_validation import verify_run, file_hash
 
 
 def summarize(milliseconds, batch_size):
@@ -252,7 +251,7 @@ def main():
               "execution": {"eval_mode": True, "inference_mode": True, "deterministic_algorithms": True,
                             "cudnn_benchmark": False, "tf32": False, "compiled": False, "workers": 0,
                             "timing": "perf_counter_ns, synchronize CUDA before and after every batch"},
-              "source_sha256": {name: file_hash(Path(__file__).with_name(name)) for name in
+              "source_sha256": {name: file_hash(source_path(name)) for name in
                                 ("benchmark_latency.py", "modules.py", "dataset.py", "train.py", "compare_validation.py")},
               "split_sha256": audit["split_sha256"],
               "validation_subset": {"slices": len(rows), "patients": len({r['patient_id'] for r in rows}),

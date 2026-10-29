@@ -6,29 +6,43 @@ Only the existing train.py evaluation interface is invoked, never training.
 AI-assisted implementation with tests for freeze integrity and metric separation.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import PROJECT_ROOT, source_path
+
 import argparse
 import csv
 from datetime import datetime, timezone
 import json
-from pathlib import Path
 import shutil
 import subprocess
-import sys
 
-if __package__:
-    from .compare_validation import verify_run, file_hash, read_json, align_predictions, require_metrics_match, metric_table
-    from .dataset import load_splits, CLASS_TO_INDEX
-    from .metrics import classification_metrics, aggregate_patients
-    from .analyze_confidence import threshold_summary
-else:
-    from compare_validation import verify_run, file_hash, read_json, align_predictions, require_metrics_match, metric_table
-    from dataset import load_splits, CLASS_TO_INDEX
-    from metrics import classification_metrics, aggregate_patients
-    from analyze_confidence import threshold_summary
+from scripts.compare_validation import verify_run, file_hash, read_json, align_predictions, require_metrics_match, metric_table
+from dataset import load_splits, CLASS_TO_INDEX
+from metrics import classification_metrics, aggregate_patients
+from scripts.analyze_confidence import threshold_summary
 
 
 SOURCE_FILES = ("final_evaluation.py", "train.py", "dataset.py", "modules.py", "metrics.py",
-                "training_state.py", "compare_validation.py", "analyze_confidence.py")
+                "training_state.py", "compare_validation.py", "analyze_confidence.py",
+                "_paths.py", "__init__.py")
+
+
+def snapshot_code(root):
+    """Preserve the core/scripts layout so frozen code runs independently."""
+    for name in SOURCE_FILES:
+        source = source_path(name)
+        destination = root / "code" / source.relative_to(PROJECT_ROOT)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def frozen_evaluator(root):
+    """Support both the current layout and existing flat archived snapshots."""
+    structured = root / "code/scripts/final_evaluation.py"
+    return structured if structured.is_file() else root / "code/final_evaluation.py"
 
 
 def write_new_json(path, value):
@@ -86,10 +100,7 @@ def freeze(args):
                                        "preprocessing": config["preprocessing"], "input_scaling": config.get("input_scaling", "unit"),
                                        "seed": 42, "device": "cuda", "workers": 0, "threads": 4}})
     root.mkdir(parents=True, exist_ok=False)
-    for name in SOURCE_FILES:
-        destination = root / "code" / name
-        destination.parent.mkdir(exist_ok=True)
-        shutil.copy2(Path(__file__).with_name(name), destination)
+    snapshot_code(root)
     for name in ("audit.json", "train.csv", "val.csv", "test.csv"):
         destination = root / "frozen/splits" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -211,8 +222,9 @@ def evaluate(root):
         raise ValueError("Final results already exist. Read them instead of repeating test evaluation")
     frozen, digest = verify_freeze(root)
     # Run this stage from the archived script so reporting code is also frozen.
-    if Path(__file__).resolve() != root / "code/final_evaluation.py":
-        subprocess.run([sys.executable, str(root / "code/final_evaluation.py"), "evaluate", "--output", str(root)], check=True)
+    archived_script = frozen_evaluator(root)
+    if Path(__file__).resolve() != archived_script:
+        subprocess.run([sys.executable, str(archived_script), "evaluate", "--output", str(root)], check=True)
         return
     splits, audit = load_splits(root / "frozen/splits")
     rows = splits["test"]

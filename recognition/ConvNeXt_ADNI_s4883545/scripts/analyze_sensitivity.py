@@ -5,11 +5,16 @@ Checkpoint identities and the existing review thresholds remain fixed.
 AI-assisted implementation for COMP3710, Weijie Peng.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 import csv
 from datetime import datetime, timezone
 import json
-from pathlib import Path
 import time
 
 import numpy as np
@@ -18,8 +23,8 @@ import numpy as np
 from train import seed_everything, PREPROCESSING_BY_SCALING
 from dataset import ADNIDataset, load_splits
 from modules import build_model, checkpoint_weight_kind
-from compare_validation import verify_run, file_hash
-from benchmark_latency import state_hash
+from scripts.compare_validation import verify_run, file_hash
+from scripts.benchmark_latency import state_hash
 from metrics import classification_metrics
 
 import torch
@@ -196,7 +201,7 @@ def main():
             "case_paths": [c["path"] for c in cases], "test_evaluated": False, "training_performed": False,
             "gpu": torch.cuda.get_device_name(), "torch": str(torch.__version__), "seed": 42,
             "analysis_sha256": file_hash(args.analysis), "cases_sha256": file_hash(args.cases),
-            "source_sha256": {f: file_hash(Path(__file__).with_name(f)) for f in
+            "source_sha256": {f: file_hash(source_path(f)) for f in
                               (Path(__file__).name, "dataset.py", "modules.py", "metrics.py", "compare_validation.py")},
             "split_sha256": audit["split_sha256"],
             "models": {k: {"checkpoint_sha256": v["checkpoint_sha256"], "run": v["run"]} for k, v in verified.items()},

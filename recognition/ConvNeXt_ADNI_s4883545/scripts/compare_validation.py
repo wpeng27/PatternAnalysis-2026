@@ -6,21 +6,22 @@ are recomputed from P(AD). Slice cross-entropy is checked against selected histo
 because rounded exported probabilities cannot reproduce logits-based CE exactly.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 from collections import Counter, defaultdict
 import csv
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 
-if __package__:
-    from .dataset import CLASS_TO_INDEX, load_splits
-    from .metrics import aggregate_patients, classification_metrics, SELECTION_RULE
-else:
-    from dataset import CLASS_TO_INDEX, load_splits
-    from metrics import aggregate_patients, classification_metrics, SELECTION_RULE
+from dataset import CLASS_TO_INDEX, load_splits
+from metrics import aggregate_patients, classification_metrics, SELECTION_RULE
 
 
 def file_hash(path):
@@ -74,10 +75,7 @@ def require_metrics_match(expected, recorded):
 
 def verify_run(run, evaluation_dir, expected_model, rows, audit):
     import torch
-    if __package__:
-        from .modules import checkpoint_weight_kind
-    else:
-        from modules import checkpoint_weight_kind
+    from modules import checkpoint_weight_kind
 
     config = read_json(run / "config.json")
     status = read_json(run / "status.json")
@@ -94,7 +92,7 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
             raise ValueError("Split identity/seed mismatch")
     if config["class_to_index"] != CLASS_TO_INDEX or config["model_settings"]["input_shape"] != [3, 224, 224]:
         raise ValueError("Class mapping/input shape mismatch")
-    metric_hash = file_hash(Path(__file__).with_name("metrics.py"))
+    metric_hash = file_hash(source_path("metrics.py"))
     if config["source_sha256"]["metrics.py"] != metric_hash:
         raise ValueError("Recorded metric implementation differs from the recomputation code")
     if config["selection_rule"] != SELECTION_RULE or config["early_stopping_min_delta"] != 0:
@@ -144,10 +142,7 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
     if checkpoint["config"].get("lr_schedule", "plateau") != schedule_kind:
         raise ValueError("Checkpoint scheduler identity mismatch")
     if schedule_kind == "warmup_cosine":
-        if __package__:
-            from .training_state import verify_cosine_checkpoint
-        else:
-            from training_state import verify_cosine_checkpoint
+        from training_state import verify_cosine_checkpoint
         scheduler_settings = verify_cosine_checkpoint(checkpoint, config)
     else:
         scheduler_settings = {key: scheduler[key] for key in
@@ -185,10 +180,7 @@ def verify_run(run, evaluation_dir, expected_model, rows, audit):
 def verify_optimizer_groups(checkpoint, config, learning_rate):
     """Check actual decay rates and membership, including legacy single groups."""
     import torch
-    if __package__:
-        from .modules import build_model, weight_decay_groups
-    else:
-        from modules import build_model, weight_decay_groups
+    from modules import build_model, weight_decay_groups
     policy = config.get("weight_decay_policy", "all")
     if checkpoint["config"].get("weight_decay_policy", "all") != policy:
         raise ValueError("Checkpoint/run weight-decay policy mismatch")

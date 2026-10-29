@@ -5,24 +5,23 @@ a checkpoint accepted by train.py --resume. Raises on any failed check.
 AI-assisted implementation for Weijie Peng's COMP3710 project.
 """
 
+# Support direct script execution from any working directory.
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts._paths import source_path
+
 import argparse
 from datetime import datetime, timezone
 import hashlib
-from pathlib import Path
 
 import torch
 from torch.nn import functional as F
 
-if __package__:
-    from .dataset import CLASS_TO_INDEX
-    from .modules import build_model
-    from .train import PREPROCESSING, seed_everything
-    from .training_state import save_checkpoint, write_json
-else:
-    from dataset import CLASS_TO_INDEX
-    from modules import build_model
-    from train import PREPROCESSING, seed_everything
-    from training_state import save_checkpoint, write_json
+from dataset import CLASS_TO_INDEX
+from modules import build_model
+from train import PREPROCESSING, seed_everything
+from training_state import save_checkpoint, write_json
 
 
 def require(condition, message):
@@ -114,7 +113,7 @@ def verify(output, device_name="cuda", amp=False):
                   "total_parameters": total, "trainable_parameters": trainable,
                   "architecture": str(model), "drop_path_rate": 0.0,
                   "optimizer": {"name": "AdamW", "lr": 1e-3, "weight_decay": 1e-4},
-                  "source_sha256": hashlib.sha256(Path(__file__).with_name("modules.py").read_bytes()).hexdigest()}
+                  "source_sha256": hashlib.sha256(source_path("modules.py").read_bytes()).hexdigest()}
         checkpoint_path = output / "verification.pt"
         save_checkpoint(checkpoint_path, {
             "purpose": "Synthetic model verification only", "model_name": "convnext_tiny",
