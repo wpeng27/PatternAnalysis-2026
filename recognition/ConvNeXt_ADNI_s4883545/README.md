@@ -10,6 +10,7 @@
 4. [Architecture and training protocol](#4-architecture-and-training-protocol)
 5. [Experiments and convergence](#5-experiments-and-convergence)
 6. [Validation and test comparison](#6-validation-and-test-comparison)
+7. [Confidence and human review](#7-confidence-and-human-review)
 
 ## 1. Overview
 
@@ -145,3 +146,27 @@ For historical comparison, the original freeze occurred on **25 October 2026**, 
 I used later test results to guide further experiments. Selecting each checkpoint by validation loss does not remove the bias introduced by this broader test-guided search. The 74.40% EMA result is descriptive exploratory evidence, not a newly frozen final estimate. Neither model meets 80%. No significance claim is made for their 3.09-point test difference, and correlated slices are not independent samples.
 
 Test confusion matrices, with true rows and predicted columns in [NC, AD] order, are CNN `[[4079,461],[2121,2339]]` and EMA `[[3996,544],[1760,2700]]`. EMA therefore misses **1,760 of 4,460 AD-labelled slices**. These are slice errors, not counts of missed patient diagnoses. Secondary patient-mean accuracy is CNN/EMA **95.81%/93.95% on validation** and **71.33%/77.33% on test**, with the same evaluation-history limitations. Patient aggregation cannot satisfy the primary slice target.
+
+## 7. Confidence and human review
+
+Confidence is `max(P(AD), 1-P(AD))`, not a calibrated probability of correctness. Using validation data only, I selected the lowest threshold achieving maximum coverage subject to at least 90% accepted accuracy and 50% coverage. Predictions at or above the threshold are accepted, keeping all ties. No temperature scaling or other calibration was fitted.
+
+| Validation statistic | CNN | EMA |
+|---|---:|---:|
+| Selected threshold | 0.5 | **0.5549529194831848** |
+| Coverage | 100.00% | 98.16% |
+| Accepted accuracy | 92.1860% | 90.0024% |
+| Accepted / referred slices | 4,300 / 0 | 4,221 / 79 |
+| Errors accepted / referred | 336 / 0 | 422 / 28 |
+| Mean confidence on wrong predictions | 78.68% | 81.60% |
+| Correctness AUROC | 0.884403 | 0.829978 |
+| Binary Brier score | 0.059112 | 0.082394 |
+| ECE, ten confidence bins | 0.028103 | 0.044942 |
+
+![Validation accuracy versus coverage and confidence reliability](report/figures/confidence.png)
+
+Correctness AUROC treats correctness as positive and confidence as the score, distinct from AD AUROC. Brier is mean `(P(AD)-label)^2`. ECE uses ten equal-width bins over [0.5,1]. CNN has better validation confidence ranking and lower Brier/ECE. EMA refers only **6.22% of its 450 errors**, retaining 139 AD false negatives. Its referred group also includes 51 correct predictions. CNN accepts everything because it already exceeds the stated 90% objective, which is not evidence that all its predictions are reliable.
+
+At confidence at least 0.95, EMA still makes 112 validation errors across 37 patients, including 39 AD false negatives. CNN makes 85 errors across 19 patients. At threshold 0.95, EMA's accepted accuracy is 96.34% at 71.26% coverage. At 0.99 it reaches 98.07%, but coverage falls below the proposed minimum to 49.35%. The selected EMA policy's patient-bootstrap 95% interval for accepted accuracy is 87.52%-92.27%, from 2,000 replicates with seed 42. This descriptive interval does not correct for selecting the model and threshold on the same patients.
+
+The exact [review policy](report/review_policy.json) is bound to checkpoint and split hashes. It was selected using validation data after earlier test exposure and has **not been evaluated on test for EMA**. It is a reproducible research operating point, not a guarantee. Additional disagreement/context policies below remain exploratory and have not replaced it.
