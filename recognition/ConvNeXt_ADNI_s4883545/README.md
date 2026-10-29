@@ -14,6 +14,7 @@
 8. [Computational cost](#8-computational-cost)
 9. [Failure cases and diagnostic experiments](#9-failure-cases-and-diagnostic-experiments)
 10. [Engineering recommendation](#10-engineering-recommendation)
+11. [Reproducibility and usage](#11-reproducibility-and-usage)
 
 ## 1. Overview
 
@@ -231,3 +232,71 @@ The validation-to-test gaps are **15.13 points for EMA and 20.87 for CNN**. Pati
 EMA remains **5.60 points below 80%**, and **60.54% test AD recall** means 39.46% of AD-labelled slices are missed. High AUROC and accepted-case accuracy do not compensate for this operating-point weakness. The selected confidence threshold retains most errors and misses confident false negatives. Lowering the AD decision boundary could trade false positives for recall, but must be developed using validation rather than chosen from test mistakes.
 
 My recommendation is to preserve the current checkpoints, preprocessing and review policy, report the shortfall, and stop using this exposed test set to guide changes. For further work, I would freeze candidates and evaluate untouched patients, ideally across independent acquisition conditions, with patient-level uncertainty estimates and workload-specific latency. Calibration, an AD-recall-oriented decision rule and disagreement/context review are candidates for that study. Repeated test exposure cannot be repaired by another run on the same test set. The complexity is justified for this architectural investigation, not yet as an established deployment improvement.
+
+## 11. Reproducibility and usage
+
+The required entry points are [modules.py](modules.py), [dataset.py](dataset.py), [train.py](train.py) and [predict.py](predict.py). Helper scripts provide metrics, training state, curves, comparison, confidence, diagnostics and latency. No model download is embedded in the code.
+
+Recorded environment: Windows 11, Python **3.13.3**, PyTorch **2.9.0+cu126**, torchvision **0.24.0+cu126**, Pillow **11.3.0**, NumPy **2.3.3**, scikit-learn **1.8.0**, Matplotlib **3.10.6**, CUDA runtime **12.6** and RTX 4070. Run all commands below from the **repository root**. Matching [PyTorch installation commands](https://pytorch.org/get-started/previous-versions/) are:
+
+```powershell
+py -3.13 -m pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cu126
+py -3.13 -m pip install Pillow==11.3.0 numpy==2.3.3 scikit-learn==1.8.0 matplotlib==3.10.6
+$p = 'recognition/ConvNeXt_ADNI_s4883545'
+py -3.13 "$p/train.py" --check-environment
+py -3.13 "$p/train.py" --help
+py -3.13 "$p/predict.py" --help
+```
+
+Obtain the processed ADNI data through authorized course access and place it at `ADNI/AD_NC`. Cloning this repository supplies neither data nor trained weights. Create the audited manifests once, using a fresh directory:
+
+```powershell
+py -3.13 "$p/dataset.py" --data-root ADNI/AD_NC --seed 42 --val-fraction 0.2 --output "$p/artifacts/splits_seed42"
+```
+
+If those saved manifests already exist, reuse them. Do not overwrite the experiment splits. Their audit rechecks identities and hashes when loaded.
+
+Fresh training commands, with output names distinct from the recorded runs:
+
+```powershell
+$cnn = "$p/artifacts/runs/cnn_reproduction"
+$ema = "$p/artifacts/runs/ema_reproduction"
+
+py -3.13 "$p/train.py" --model small_cnn --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --epochs 20 --batch-size 32 --lr 0.001 --weight-decay 0.0001 --input-scaling unit --train-augmentation none --seed 42 --device cuda --workers 0 --threads 4 --amp --amp-dtype float16 --patience 5 --min-delta 0 --lr-patience 2 --lr-factor 0.5 --output $cnn
+
+py -3.13 "$p/train.py" --model convnext_tiny --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --epochs 40 --batch-size 16 --lr 0.0001 --weight-decay 0.01 --weight-decay-policy exclude_1d_bias --ema --ema-decay 0.999 --drop-path-rate 0.1 --input-scaling centered --train-augmentation mild_affine --seed 42 --device cuda --workers 0 --threads 4 --amp --amp-dtype bfloat16 --lr-schedule plateau --patience 5 --min-delta 0 --lr-patience 2 --lr-factor 0.5 --output $ema
+```
+
+The recorded CNN lineage included a three-epoch trial, a one-epoch resume check and continuation to epoch 20. A fresh command reproduces its configuration, not a claim of bit-identical execution history. Different hardware/libraries can also change results. Saved `best.pt` and `last.pt` contain evaluation and resumable state. Resume uses `--resume <run>/last.pt` with the same training settings and a fresh output directory. `--epochs` is the total target, not additional epochs. Completed epoch history is in `history.json`, with `config.json`, `status.json` and `training.log` for settings and progress.
+
+Evaluate the reloaded checkpoints on validation, produce curves and select a new confidence policy for these new weights:
+
+```powershell
+py -3.13 "$p/train.py" --mode evaluate --model small_cnn --checkpoint "$cnn/best.pt" --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --eval-split val --batch-size 32 --device cuda --workers 0 --save-predictions --output "${cnn}_validation"
+py -3.13 "$p/train.py" --mode evaluate --model convnext_tiny --checkpoint "$ema/best.pt" --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --eval-split val --batch-size 16 --device cuda --workers 0 --save-predictions --output "${ema}_validation"
+py -3.13 "$p/report_run.py" --run $cnn --validation "${cnn}_validation/evaluation.json"
+py -3.13 "$p/report_run.py" --run $ema --validation "${ema}_validation/evaluation.json"
+py -3.13 "$p/compare_validation.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --output "$p/artifacts/comparison_reproduction"
+py -3.13 "$p/analyze_confidence.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --experiment-status after_test_exposure --output "$p/artifacts/confidence_reproduction"
+```
+
+The existing test set remains exposed even for these new runs. To explicitly reproduce test inference after fixing a configuration, change `--eval-split val` to `--eval-split test` and choose a fresh output directory. Such results remain exploratory. No test inference was executed when preparing this report.
+
+The following demonstration uses my retained selected checkpoint. The exact original file must be available at the indicated path. Otherwise train above and substitute the new checkpoint, omitting the old review policy or using its newly selected replacement.
+
+```powershell
+$best = "$p/artifacts/runs/convnext_ema0999_grouped_wd_20261026/best.pt"
+py -3.13 "$p/predict.py" --checkpoint $best --data-root ADNI/AD_NC --splits "$p/artifacts/splits_seed42" --limit 12 --device cuda --review-policy "$p/report/review_policy.json" --output "$p/artifacts/prediction_demo_reproduction"
+
+# Replace this path with an image to predict individually
+py -3.13 "$p/predict.py" --checkpoint $best --images path/to/image.jpeg --device cpu --output "$p/artifacts/single_image_reproduction"
+
+py -3.13 "$p/benchmark_latency.py" --cnn-run $cnn --convnext-run $ema --splits "$p/artifacts/splits_seed42" --data-root ADNI/AD_NC --output "$p/artifacts/latency_reproduction"
+py -3.13 -m unittest discover -s $p -p 'test_*.py'
+```
+
+Prediction restores architecture, EMA identity, preprocessing and CUDA precision. CPU uses FP32, which can slightly change probabilities. Outputs are `predictions.csv`, `prediction.json` and `demo.png`. Individual images have unknown ground truth, with no labels inferred from folders. `--limit` selects evenly spaced manifest positions and labels metrics as a demonstration subset. Omit it for complete validation metrics. A full audited split additionally reports patient aggregation. Review policies must match checkpoint and split hashes. All output directories must be fresh.
+
+The selected EMA checkpoint SHA-256 is `c1e792929e2cc7511489fa7807c96c8e895a80645c1aa273f52f44e42c0096f3`. CNN's is `722924cedcdd6afb053ed7967d04e1688e601b9f74909d6305d6af382e654fe5`. Compact evidence preserves identities, full-precision metrics, histories, confidence statistics and latency summaries. It permits inspection of report claims without private files, but cannot replace those files for rerunning inference.
+
+Verification completed during development includes patient/duplicate audits, known-label metric calculations, shape and finite-gradient checks, an optimizer update, checkpoint reloads and resumed training. The prediction milestone passed 35 targeted tests and reproduced every saved P(AD) value for both models on all 4,300 validation slices. The single-image CPU demonstration also ran. Latency's four tests and timing recomputation passed. These checks were completed during development. The entire test suite was not rerun during report preparation.
