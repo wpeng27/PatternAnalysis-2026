@@ -16,6 +16,7 @@
 10. [Engineering recommendation](#10-engineering-recommendation)
 11. [Reproducibility and usage](#11-reproducibility-and-usage)
 12. [Artificial Intelligence Usage Disclosure](#12-artificial-intelligence-usage-disclosure)
+13. [References](#13-references)
 
 ## 1. Overview
 
@@ -307,3 +308,14 @@ Verification completed during development includes patient/duplicate audits, kno
 **Tools and scope.** I used OpenAI ChatGPT/Codex as a guidance and assistance tool throughout the project. This included support with project planning, literature and specification lookup, feasibility discussions, patient data parsing and validation, PyTorch architecture development, training and evaluation workflows, metrics, checkpointing, experimental improvements, plotting, confidence analysis, diagnostics, prediction demonstrations, latency measurement and report writing. AI was primarily used to explain concepts, suggest possible approaches, troubleshoot issues and provide example code or improvements. These suggestions were reviewed, adapted and integrated into my own implementation rather than being used without evaluation.
 
 **Verification and responsibility.** I independently reviewed, tested and refined the implementation using data audits, known-answer tests, architecture and gradient checks, checkpoint reloads, actual training results, prediction verification, confidence analysis and timing measurements. AI-generated suggestions were evaluated against experimental results and adjusted where necessary. All figures and metrics were produced using actual experimental data and validation inputs, rather than AI-generated MRI images or fabricated results. I maintained responsibility for implementation decisions, experimental evaluation, interpretation of results and the final report. AI served as a supporting resource for learning, problem-solving and improving the quality of my work, rather than replacing my own development and analysis.
+
+## 13. References
+1. Liu, Z., Mao, H., Wu, C.-Y., Feichtenhofer, C., Darrell, T. and Xie, S. (2022). [A ConvNet for the 2020s](https://arxiv.org/abs/2201.03545). CVPR, pp. 11976-11986.
+2. Meta Research. Official ConvNeXt [model implementation](https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py), [parameter grouping](https://github.com/facebookresearch/ConvNeXt/blob/main/optim_factory.py) and [training engine](https://github.com/facebookresearch/ConvNeXt/blob/main/engine.py). MIT license, retained locally.
+3. PyTorch. [Versioned installation commands](https://pytorch.org/get-started/previous-versions/), [PyTorch 2.9 CUDA execution and synchronization](https://docs.pytorch.org/docs/2.9/notes/cuda.html#asynchronous-execution), and [torchvision 0.24 stochastic depth](https://docs.pytorch.org/vision/0.24/generated/torchvision.ops.stochastic_depth.html).
+4. [Alzheimer's Disease Neuroimaging Initiative](https://adni.loni.usc.edu/). Dataset supplied as processed JPEG slices through the course.
+ADNI \| alzheimer’s disease neuroimaging initiative. (n.d.). ADNI. Retrieved October 15, 2026, from [https\://adni.loni.usc.edu/](https://adni.loni.usc.edu/)
+5. Convnext\_tiny — Torchvision 0.29 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext\_tiny.html](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext_tiny.html)
+6. ConvNeXt — Torchvision 0.28 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/0.28/models/convnext.html](https://docs.pytorch.org/vision/0.28/models/convnext.html)
+7. GeeksforGeeks. (2025, July 14). ConvNeXt. GeeksforGeeks. [https\://www\.geeksforgeeks.org/computer-vision/convnext/](https://www.geeksforgeeks.org/computer-vision/convnext/)
+8. Liu, Z., Mao, H., Wu, C.-Y., Feichtenhofer, C., Darrell, T., & Xie, S. (2022). A ConvNet for the 2020s. arXiv:2201.03545 \[Cs\]. [https\://arxiv.org/abs/2201.03545](https://arxiv.org/abs/2201.03545)
