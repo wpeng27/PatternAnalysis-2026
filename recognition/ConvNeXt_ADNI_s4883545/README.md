@@ -7,7 +7,7 @@
 1. [Overview](#1-overview)
 2. [Feasibility review](#2-feasibility-review)
 3. [Data, preprocessing and evaluation definitions](#3-data-preprocessing-and-evaluation-definitions)
-
+4. [Architecture and training protocol](#4-architecture-and-training-protocol)
 
 ## 1. Overview
 
@@ -62,3 +62,39 @@ Pillow converts each image to grayscale and bilinearly resizes it to **224 x 224
 
 Each slice contributes one primary prediction. Predict AD if **P(AD)>0.5**, otherwise NC, including ties. Accuracy is the fraction correct, macro-F1 averages the two class F1 scores, and AD AUROC uses continuous **P(AD)** with AD positive. Precision and recall are reported separately for NC and AD. Cross-entropy is sample-weighted. Secondary patient metrics average P(AD) across that patient's slices after verifying consistent labels, then apply the same boundary. Patient scores and confidence-filtered scores do not replace unfiltered slice accuracy. [metrics.py](metrics.py) implements these definitions.
 
+## 4. Architecture and training protocol
+
+[modules.py](modules.py) implements the architecture in PyTorch/torchvision. The ConvNeXt block follows the [original paper](https://arxiv.org/abs/2201.03545) and [official model](https://github.com/facebookresearch/ConvNeXt/blob/main/models/convnext.py): 7 x 7 depthwise convolution, channels-last layer normalization, fourfold linear expansion, GELU, projection, layer scale and a residual branch with stochastic depth. Local adaptations are the two-class head, native PyTorch layer normalization and torchvision stochastic depth instead of timm. Attribution and the [MIT notice](LICENSE-ConvNeXt.txt) are retained.
+
+| Component | Output, excluding batch dimension | Blocks |
+|---|---|---:|
+| Stem: 4 x 4 convolution, stride 4, normalization | 96 x 56 x 56 | - |
+| Stage 1 | 96 x 56 x 56 | 3 |
+| Downsample + stage 2 | 192 x 28 x 28 | 3 |
+| Downsample + stage 3 | 384 x 14 x 14 | 9 |
+| Downsample + stage 4 | 768 x 7 x 7 | 3 |
+| Global average pooling, final normalization, head | 2 logits | - |
+
+Separate normalization-plus-convolution downsamplers halve spatial dimensions and double channels. Layer scale starts at 1e-6, normalization epsilon is 1e-6, and stochastic-depth probability increases from 0 to 0.1. Convolutional/linear weights use truncated-normal initialization with standard deviation 0.02. No pretrained weights are fetched.
+
+The CNN has three 3 x 3 convolution blocks with 16, 32 and 64 channels, each followed by batch normalization, ReLU and max pooling. A 64 x 4 x 4 pooled representation feeds a 128-unit ReLU classifier, dropout 0.2 and two logits.
+
+**Checkpoint selection:** I used minimum validation slice cross-entropy, keeping the earliest epoch on an exact tie. I set this rule before comparing the models. Accuracy does not override this rule. Both families use the same trainer, split manifests and metric code.
+
+| Setting | CNN | Selected ConvNeXt EMA |
+|---|---|---|
+| Optimizer / initial LR | AdamW / 0.001 | AdamW / 0.0001 |
+| Betas / epsilon | (0.9, 0.999) / 1e-8 | Same |
+| Weight decay | 0.0001, all parameters | 0.01 on multidimensional weights, zero on biases and 1D parameters |
+| Batch / CUDA precision | 32 / FP16 with GradScaler | 16 / BF16 without GradScaler |
+| Scaling / augmentation | [0,1] / none | [-1,1] / mild affine |
+| Other regularization | Classifier dropout 0.2 | Stochastic depth up to 0.1 |
+| Gradient clipping / label smoothing | Norm 5 / 0 | Same |
+| EMA | None | Decay 0.999, FP32 shadow weights, successful optimizer updates only |
+| Scheduler | ReduceLROnPlateau on validation loss | Same, using EMA validation loss |
+| Scheduler settings | Factor 0.5, patience 2, absolute threshold 0, minimum LR 1e-6 | Same |
+| Early stopping | Patience 5, minimum improvement 0 | Same |
+| Epoch budget / completed / selected | 20 / 20 / 18 | 40 / 34 / 29 |
+| Seed / workers / CPU threads | 42 / 0 / 4 | Same |
+
+Bias/1D exclusions follow the [official optimizer grouping](https://github.com/facebookresearch/ConvNeXt/blob/main/optim_factory.py). EMA follows the update-after-optimizer pattern in the [official engine](https://github.com/facebookresearch/ConvNeXt/blob/main/engine.py), with a local successful-update check and fixed decay. EMA weights drive validation, scheduling, stopping and prediction. Best/last checkpoints preserve model settings, preprocessing, class mapping, optimizer, scheduler, epoch and random state. These choices differ between pipelines, so this is not an architecture-only ablation.
