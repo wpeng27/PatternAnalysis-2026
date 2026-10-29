@@ -12,6 +12,7 @@
 6. [Validation and test comparison](#6-validation-and-test-comparison)
 7. [Confidence and human review](#7-confidence-and-human-review)
 8. [Computational cost](#8-computational-cost)
+9. [Failure cases and diagnostic experiments](#9-failure-cases-and-diagnostic-experiments)
 
 ## 1. Overview
 
@@ -190,4 +191,32 @@ Latency was measured on **28 October with the selected EMA checkpoint and the CN
 
 The JPEG pipeline includes file reads and hash checks, decoding, preprocessing, batching, transfer, forward inference, softmax and returned CPU probabilities. It excludes startup, checkpoint loading, plots and metrics. Reads are warmed, and background desktop activity was present. These are session measurements, not cold-disk or service guarantees. p95 is an empirical percentile. Batch throughput is total images divided by total timed seconds, not the reciprocal of median time. Batch-16 amortized time is not single-image response latency.
 
-EMA's median batch-one pipeline is **4.18 times** CNN's at the recorded precisions. Common FP32 timings are 11.981 ms for EMA and 3.422 ms for CNN. FP32 was faster than BF16 for EMA at batch one, while BF16 was faster at batch 16. This comparison did not change evaluation precision or thresholds. EMA averaging adds no inference operation because its weights are already stored. The earlier 25 October non-EMA benchmark remains historical evidence and is not substituted for these measurements. Four latency tests and independent checks of 4,800 timing samples passed.
+EMA's median batch-one pipeline is **4.18 times** CNN's at the recorded precisions. Common FP32 timings are 11.981 ms for EMA and 3.422 ms for CNN. FP32 was faster than BF16 for EMA at batch one, while BF16 was faster at batch 16. This comparison did not change evaluation precision or thresholds. EMA averaging adds no inference operation because its weights are already stored. The earlier non-EMA benchmark remains historical evidence and is not substituted for these measurements. Four latency tests and independent checks of 4,800 timing samples passed.
+
+## 9. Failure cases and diagnostic experiments
+
+I selected cases from five different validation patients: the two most confident false negatives from distinct patients, two most confident false positives, and the least-confident referred false negative from a fifth patient. They deliberately illustrate failure modes and are not a representative frequency estimate. Case numbers replace source identifiers in the published figure. True labels are supplied folder labels, not diagnoses inferred from the pictures.
+
+![Five real incorrect predictions from the selected EMA checkpoint](report/figures/failure_cases.png)
+
+| Case | True to predicted | P(AD) | Confidence | Review | CNN prediction |
+|---|---|---:|---:|---|---|
+| 1 | AD to NC | 0.000466 | 99.9534% | Accept | AD |
+| 2 | AD to NC | 0.003273 | 99.6727% | Accept | NC |
+| 3 | NC to AD | 0.998849 | 99.8849% | Accept | NC |
+| 4 | NC to AD | 0.998736 | 99.8736% | Accept | NC |
+| 5 | AD to NC | 0.488771 | 51.1229% | Refer | AD |
+
+**Case 1: persistent confident false negative.** Visible evidence is a broad black surround, a bright curved internal band and folded edges. Exactly 70.43% of source pixels are zero, which is not a brain-mask measurement. **Possible reasons:** different learned class associations are supported by strong model disagreement, with CNN P(AD)=0.999845 versus EMA 0.000466. Slice dependence is plausible because EMA is wrong on 13/20 slices, but averaging the other 19 only raises P(AD) to 0.381163, still wrong. Tested intensity/geometry changes do not correct it. Sigma-1 blur gives 0.007577 and FP32 0.000457, weakening a simple rounding explanation. **Mitigation:** review model disagreements and patient-wide errors rather than relying on confidence alone. The experiments do not identify an anatomical cause.
+
+**Case 2: shared false negative with detail sensitivity.** The image has visible folds and a bright curved internal region against dark surroundings. **Possible reasons:** both models may lack transferable evidence for this patient, with CNN P(AD)=0.031173 and EMA 0.003273. EMA misses 13/20 slices and CNN 18/20. Sigma-1 blur raises EMA P(AD) to 0.402040, showing detail sensitivity without correcting the class. Neighbour averaging gives 0.019378 and the other-19 mean 0.349972, so context alone also fails. Original-image FP32 retains the error. **Mitigation:** audit confident agreement and patient groups as well as model disagreement. Examine acquisition metadata or controlled training changes in future work. Blur is not an adopted correction and cannot reveal whether useful anatomy or incidental texture drives the score.
+
+**Case 3: slice error resolved by broader context.** Visible evidence includes a bright internal arc, dark internal spaces and an irregular folded outline. **Possible reasons:** isolated-slice evidence is supported by EMA's nine errors among this patient's 20 slices. The neighbour mean remains wrong at P(AD)=0.742835, but the other-19 mean is 0.451924, correctly NC. CNN correctly classifies all 20 slices. Sigma-1 blur lowers P(AD) to 0.899475 but leaves the error, and original-image FP32 keeps the AD decision. **Mitigation:** flag slice/patient or model disagreement for investigation. Context helps this case but is a different prediction unit and cannot replace the primary slice result.
+
+**Case 4: confident false positive persisting across the patient.** The displayed slice contains bright folded regions and darker internal spaces surrounded by black pixels. **Possible reasons:** a model-specific association is supported by EMA's 12/20 wrong slices versus CNN's five. Averaging the other 19 slices still gives EMA P(AD)=0.644095, while CNN gives 0.348224. Sigma-1 blur gives 0.996727, and original-image FP32 gives 0.998696. The tested variants preserve the error and keep confidence above the review threshold. Overconfidence explains why review misses the error, not why the classifier learned that association. **Mitigation:** review model disagreements and patient-wide patterns. Neither simple patient averaging nor confidence-only referral solves this case.
+
+**Case 5: unstable boundary decision caught by referral.** The visible cross-section occupies a smaller area, with a broad black surround, a narrow internal bright curve and a darker upper-right region. Source zero-pixel fraction is 75.90%. **Possible reasons:** intensity sensitivity is demonstrated by P(AD)=0.824744 after brightness x0.9 and 0.306527 after x1.1. Four-pixel left/right shifts give 0.224735/0.826151. Aspect-preserving resizing gives 0.882428, but reduces full-validation EMA accuracy to 89.02%, so fixing one case does not justify changing preprocessing. The neighbour and other-19 means, 0.569246 and 0.850410, both correct this sole EMA error among the patient's 20 slices. FP32 remains wrong at 0.487798. **Mitigation:** retain referral and inspect context or stability. Do not select per-image transforms using the known label.
+
+The supporting experiments used all **4,300 validation slices**, without retraining or test inference. Brightness/contrast +/-10%, gamma 0.9/1.1, four-pixel shifts and crop/rescale corrected case 5 under six of eleven changes, but never corrected the four confident cases. Additional blur, resampling and aspect controls left those four wrong. CNN was especially sensitive: sigma-1 blur reduced validation accuracy to 48.26%, versus EMA's 88.33%. This supports preprocessing sensitivity, not a proven anatomical explanation.
+
+EMA neighbour-context accuracy was 91.02%, and excluding the target and averaging the other 19 patient slices gave 93.93%. These are secondary context-dependent scores. An exploratory rule referring low confidence **or** model disagreement **or** slice/patient disagreement referred 679 slices, including 379/450 errors, leaving 98.04% accepted accuracy at 84.21% coverage. It also referred 300 correct slices and incurs additional inference/context costs. No new rule was adopted, and neither these findings nor visible images establish atrophy, a scanner cause or incorrect clinical labels.
