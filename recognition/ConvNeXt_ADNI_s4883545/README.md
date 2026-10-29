@@ -13,6 +13,7 @@
 7. [Confidence and human review](#7-confidence-and-human-review)
 8. [Computational cost](#8-computational-cost)
 9. [Failure cases and diagnostic experiments](#9-failure-cases-and-diagnostic-experiments)
+10. [Engineering recommendation](#10-engineering-recommendation)
 
 ## 1. Overview
 
@@ -220,3 +221,13 @@ I selected cases from five different validation patients: the two most confident
 The supporting experiments used all **4,300 validation slices**, without retraining or test inference. Brightness/contrast +/-10%, gamma 0.9/1.1, four-pixel shifts and crop/rescale corrected case 5 under six of eleven changes, but never corrected the four confident cases. Additional blur, resampling and aspect controls left those four wrong. CNN was especially sensitive: sigma-1 blur reduced validation accuracy to 48.26%, versus EMA's 88.33%. This supports preprocessing sensitivity, not a proven anatomical explanation.
 
 EMA neighbour-context accuracy was 91.02%, and excluding the target and averaging the other 19 patient slices gave 93.93%. These are secondary context-dependent scores. An exploratory rule referring low confidence **or** model disagreement **or** slice/patient disagreement referred 679 slices, including 379/450 errors, leaving 98.04% accepted accuracy at 84.21% coverage. It also referred 300 correct slices and incurs additional inference/context costs. No new rule was adopted, and neither these findings nor visible images establish atrophy, a scanner cause or incorrect clinical labels.
+
+## 10. Engineering recommendation
+
+**I selected EMA as my final ConvNeXt model, but its current benefit does not justify replacing the CNN as the default low-cost experimental baseline. Neither model supports autonomous diagnosis.** EMA's exploratory test advantage is 3.09 percentage points, with higher macro-F1 and AD AUROC. It also resisted several preprocessing changes better than CNN. However, it has lower validation accuracy and weaker confidence routing, approximately 179 times as many parameters, 2.60 times the recorded training-process time and 4.18 times the measured single-image pipeline latency.
+
+The validation-to-test gaps are **15.13 points for EMA and 20.87 for CNN**. Patient separation and exact-duplicate checks passed, but do not prove equivalent distributions. Repeated validation adaptation, limited independent patient diversity and unobserved acquisition/appearance differences are possible contributors. Sensitivity experiments support some input dependence, without establishing a single cause. CNN's own strong blur/resampling sensitivity prevents treating its low cost as evidence of universal superiority.
+
+EMA remains **5.60 points below 80%**, and **60.54% test AD recall** means 39.46% of AD-labelled slices are missed. High AUROC and accepted-case accuracy do not compensate for this operating-point weakness. The selected confidence threshold retains most errors and misses confident false negatives. Lowering the AD decision boundary could trade false positives for recall, but must be developed using validation rather than chosen from test mistakes.
+
+My recommendation is to preserve the current checkpoints, preprocessing and review policy, report the shortfall, and stop using this exposed test set to guide changes. For further work, I would freeze candidates and evaluate untouched patients, ideally across independent acquisition conditions, with patient-level uncertainty estimates and workload-specific latency. Calibration, an AD-recall-oriented decision rule and disagreement/context review are candidates for that study. Repeated test exposure cannot be repaired by another run on the same test set. The complexity is justified for this architectural investigation, not yet as an established deployment improvement.
