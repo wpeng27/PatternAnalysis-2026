@@ -322,7 +322,13 @@ Prediction restores architecture, EMA identity, preprocessing and CUDA precision
 
 The selected EMA checkpoint SHA-256 is `c1e792929e2cc7511489fa7807c96c8e895a80645c1aa273f52f44e42c0096f3`. CNN's is `722924cedcdd6afb053ed7967d04e1688e601b9f74909d6305d6af382e654fe5`. Compact evidence preserves identities, full-precision metrics, histories, confidence statistics and latency summaries. It permits inspection of report claims without private files, but cannot replace those files for rerunning inference.
 
-Verification completed during development includes patient/duplicate audits, known-label metric calculations, shape and finite-gradient checks, an optimizer update, checkpoint reloads and resumed training. The prediction milestone passed 35 targeted tests and reproduced every saved P(AD) value for both models on all 4,300 validation slices. The single-image CPU demonstration also ran. Latency's four tests and timing recomputation passed. These checks were completed during development. The entire test suite was not rerun during report preparation.
+Verification completed during development includes patient/duplicate audits, known-label metric calculations, shape and finite-gradient checks, an optimizer update, checkpoint reloads and resumed training. Latency's four tests and timing recomputation also passed.
+
+**Final reproducibility check:** all 109 automated tests passed. Installed dependency versions matched the environment above, `pip check` found no broken requirements, and the RTX 4070 passed a real CUDA forward/backward check. The 15 documented script commands were checked for valid paths and options, and the training commands matched the saved configurations, including the legacy CNN loader's FP16 default. Recreating patient assignments from the saved manifests with seed 42 reproduced the existing split exactly.
+
+Both selected checkpoints were reloaded through `train.py --mode evaluate` and `predict.py`. Each reproduced all 4,300 saved validation P(AD) values exactly, with maximum absolute difference **0.0**. Accuracy remained **92.19% for CNN epoch 18** and **89.53% for EMA ConvNeXt epoch 29**. Loss, per-class metrics, macro-F1, AUROC and patient aggregation also matched. Prediction CSV/JSON fields and preview images were checked, and unlabelled single-image CPU prediction passed. Regenerated validation comparison and confidence reports reproduced the saved thresholds, with zero CNN referrals and 79 EMA referrals. Checkpoint, manifest and published evidence hashes remained unchanged.
+
+This check verifies the retained checkpoints in the recorded environment. It does not constitute a fresh full training reproduction, a clean-environment installation or a new latency benchmark. No test images were opened or evaluated. Detailed logs and prediction exports remain local under ignored `artifacts/`.
 
 ## 12. Artificial Intelligence Usage Disclosure
 
