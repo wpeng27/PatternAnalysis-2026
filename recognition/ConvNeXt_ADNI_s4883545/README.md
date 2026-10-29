@@ -9,6 +9,7 @@
 3. [Data, preprocessing and evaluation definitions](#3-data-preprocessing-and-evaluation-definitions)
 4. [Architecture and training protocol](#4-architecture-and-training-protocol)
 5. [Experiments and convergence](#5-experiments-and-convergence)
+6. [Validation and test comparison](#6-validation-and-test-comparison)
 
 ## 1. Overview
 
@@ -123,3 +124,24 @@ An earlier one-epoch FP16 ConvNeXt trial skipped 33 of 1,077 attempted optimizer
 ![Training and validation loss and accuracy, with selected checkpoints](report/figures/learning_curves.png)
 
 CNN training loss fell from 0.5169 to 0.0541, but validation was unstable: epoch 16 reached loss 6.7379 and accuracy 49.00% before recovery. Epoch 18 minimizes loss. Epoch 20's 92.49% accuracy does not override its higher 0.233174 loss. EMA validation loss fell from 0.687097 to 0.291337 at epoch 29. Epochs 30-34 did not improve it, triggering early stopping. Epoch 34 reached 90.09% validation accuracy while online training accuracy reached 94.41%. This indicates diminishing validation-loss gains, not evidence that more epochs would improve unseen patients. Training curves use changing online weights and regularization, while EMA validation uses averaged weights. Both loss panels use a logarithmic axis to retain the CNN spike.
+
+## 6. Validation and test comparison
+
+The current comparison uses identical **4,300 validation slices from 215 patients** and **9,000 test slices from 450 patients**. All slices are included, without confidence filtering. EMA is my final selected ConvNeXt model for this submission. CNN test results reuse its original frozen evaluation. EMA test results are later exploratory measurements.
+
+| Metric | CNN validation | EMA validation | CNN test, original frozen | EMA test, exploratory |
+|---|---:|---:|---:|---:|
+| Accuracy | 92.19% | 89.53% | 71.31% | 74.40% |
+| Cross-entropy | 0.220289 | 0.291337 | 2.096713 | 0.979386 |
+| Macro-F1 | 0.921831 | 0.895348 | 0.701971 | 0.738579 |
+| AD AUROC | 0.977354 | 0.958063 | 0.785493 | 0.824349 |
+| NC precision | 93.53% | 92.79% | 65.79% | 69.42% |
+| NC recall | 91.17% | 86.44% | 89.85% | 88.02% |
+| AD precision | 90.82% | 86.51% | 83.54% | 83.23% |
+| AD recall | 93.27% | 92.84% | 52.44% | **60.54%** |
+
+For historical comparison, the original freeze occurred on **25 October 2026**, before test inference. That pair was CNN epoch 18 and the earlier non-EMA ConvNeXt epoch 29 from the LR 3e-5 affine lineage. Their test accuracies remain **71.31% and 70.72%**, respectively. The original ConvNeXt's macro-F1 was 0.703283 and AD AUROC 0.784545. This earlier ConvNeXt is not my final selected model. Its checkpoint is distinct from EMA even though both selected epochs are numbered 29.
+
+I used later test results to guide further experiments. Selecting each checkpoint by validation loss does not remove the bias introduced by this broader test-guided search. The 74.40% EMA result is descriptive exploratory evidence, not a newly frozen final estimate. Neither model meets 80%. No significance claim is made for their 3.09-point test difference, and correlated slices are not independent samples.
+
+Test confusion matrices, with true rows and predicted columns in [NC, AD] order, are CNN `[[4079,461],[2121,2339]]` and EMA `[[3996,544],[1760,2700]]`. EMA therefore misses **1,760 of 4,460 AD-labelled slices**. These are slice errors, not counts of missed patient diagnoses. Secondary patient-mean accuracy is CNN/EMA **95.81%/93.95% on validation** and **71.33%/77.33% on test**, with the same evaluation-history limitations. Patient aggregation cannot satisfy the primary slice target.
