@@ -11,6 +11,7 @@
 5. [Experiments and convergence](#5-experiments-and-convergence)
 6. [Validation and test comparison](#6-validation-and-test-comparison)
 7. [Confidence and human review](#7-confidence-and-human-review)
+8. [Computational cost](#8-computational-cost)
 
 ## 1. Overview
 
@@ -170,3 +171,23 @@ Correctness AUROC treats correctness as positive and confidence as the score, di
 At confidence at least 0.95, EMA still makes 112 validation errors across 37 patients, including 39 AD false negatives. CNN makes 85 errors across 19 patients. At threshold 0.95, EMA's accepted accuracy is 96.34% at 71.26% coverage. At 0.99 it reaches 98.07%, but coverage falls below the proposed minimum to 49.35%. The selected EMA policy's patient-bootstrap 95% interval for accepted accuracy is 87.52%-92.27%, from 2,000 replicates with seed 42. This descriptive interval does not correct for selecting the model and threshold on the same patients.
 
 The exact [review policy](report/review_policy.json) is bound to checkpoint and split hashes. It was selected using validation data after earlier test exposure and has **not been evaluated on test for EMA**. It is a reproducible research operating point, not a guarantee. Additional disagreement/context policies below remain exploratory and have not replaced it.
+
+## 8. Computational cost
+
+Measured on an NVIDIA GeForce RTX 4070. Parameter counts include all trainable parameters. VRAM is peak PyTorch allocated/reserved memory during complete training steps, not total GPU use. Training-process time includes recorded run segments but excludes prior experiments, idle time and separate evaluation.
+
+| Measurement | CNN | Selected EMA ConvNeXt |
+|---|---:|---:|
+| Total / trainable parameters | 155,154 / 155,154 | 27,821,666 / 27,821,666 |
+| Peak allocated / reserved training VRAM | 0.380 / 0.537 GiB | 1.474 / 1.656 GiB |
+| Recorded training-process runtime | 19.59 min | 50.88 min |
+| Training batch / precision | 32 / FP16 | 16 / BF16 |
+| Batch-one GPU forward median / p95 | 1.408 / 2.564 ms | 14.893 / 21.653 ms |
+| Batch-one JPEG pipeline median / p95 | 4.425 / 5.352 ms | **18.506 / 25.922 ms** |
+| Batch-16 JPEG pipeline throughput | 450.9 images/s | 327.0 images/s |
+
+Latency was measured on **28 October with the selected EMA checkpoint and the CNN in the same session**. The same 128 validation slices from 95 patients were used, with three repeats of 20 warm-up and 100 timed batches per setting. Synchronization brackets each timing interval, following [PyTorch guidance](https://docs.pytorch.org/docs/2.9/notes/cuda.html#asynchronous-execution). Models use evaluation/inference mode, contiguous tensors, deterministic algorithms, no TF32 and no compilation.
+
+The JPEG pipeline includes file reads and hash checks, decoding, preprocessing, batching, transfer, forward inference, softmax and returned CPU probabilities. It excludes startup, checkpoint loading, plots and metrics. Reads are warmed, and background desktop activity was present. These are session measurements, not cold-disk or service guarantees. p95 is an empirical percentile. Batch throughput is total images divided by total timed seconds, not the reciprocal of median time. Batch-16 amortized time is not single-image response latency.
+
+EMA's median batch-one pipeline is **4.18 times** CNN's at the recorded precisions. Common FP32 timings are 11.981 ms for EMA and 3.422 ms for CNN. FP32 was faster than BF16 for EMA at batch one, while BF16 was faster at batch 16. This comparison did not change evaluation precision or thresholds. EMA averaging adds no inference operation because its weights are already stored. The earlier 25 October non-EMA benchmark remains historical evidence and is not substituted for these measurements. Four latency tests and independent checks of 4,800 timing samples passed.
