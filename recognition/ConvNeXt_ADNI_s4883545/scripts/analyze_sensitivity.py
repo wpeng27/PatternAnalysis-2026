@@ -2,7 +2,7 @@
 
 Perturbations are diagnostics, not certified label-preserving transformations.
 Checkpoint identities and the existing review thresholds remain fixed.
-AI-assisted implementation for COMP3710, Weijie Peng.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

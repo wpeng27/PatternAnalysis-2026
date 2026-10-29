@@ -2,6 +2,7 @@
 
 Resume is supported at completed epoch boundaries on the same software/device
 configuration. Mid-epoch restart and cross-platform bitwise identity are not promised.
+AI-assisted implementation.
 """
 
 import json

@@ -2,7 +2,7 @@
 
 Saves measured checks and a verification-only checkpoint, not an experiment or
 a checkpoint accepted by train.py --resume. Raises on any failed check.
-AI-assisted implementation for Weijie Peng's COMP3710 project.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

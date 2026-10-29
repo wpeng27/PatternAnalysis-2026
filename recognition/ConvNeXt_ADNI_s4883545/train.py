@@ -3,6 +3,7 @@
 Training validates after each epoch and never evaluates the test set.
 Checkpoint evaluation defaults to validation. Test evaluation must be selected
 explicitly with --mode evaluate --eval-split test after model selection is final.
+AI-assisted implementation.
 """
 
 import argparse

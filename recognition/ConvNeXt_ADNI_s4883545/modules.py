@@ -1,4 +1,4 @@
-"""ADNI model components. AI-assisted implementation for Weijie Peng's COMP3710 project."""
+"""ADNI model components. AI-assisted implementation."""
 
 import math
 from copy import deepcopy

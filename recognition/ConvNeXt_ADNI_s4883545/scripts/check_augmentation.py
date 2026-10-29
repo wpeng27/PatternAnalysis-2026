@@ -3,6 +3,7 @@
 This is a functional smoke check, not a model performance experiment. It reads
 64 training and 32 validation images from the saved manifests, never test images.
 No checkpoint is produced and no resulting weights are used by the full run.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

@@ -1,7 +1,7 @@
 """Audit ADNI JPEGs, save patient-disjoint splits and load grayscale tensors.
 
 Staff guidance: 392586_92.jpeg identifies patient 392586 and slice 92.
-No raw JSON lookup is required. AI-assisted implementation, validated with
+AI-assisted implementation, validated with
 synthetic leakage fixtures and the local ADNI dataset.
 """
 

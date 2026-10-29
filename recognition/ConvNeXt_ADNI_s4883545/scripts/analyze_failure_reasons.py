@@ -2,6 +2,7 @@
 
 Diagnostic variants are fixed before inference. They do not replace the saved
 preprocessing, checkpoint, decision boundary or review policy.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

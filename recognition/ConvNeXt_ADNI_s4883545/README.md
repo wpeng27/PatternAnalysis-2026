@@ -345,4 +345,3 @@ ADNI \| alzheimer’s disease neuroimaging initiative. (n.d.). ADNI. Retrieved O
 5. Convnext\_tiny — Torchvision 0.29 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext\_tiny.html](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.convnext_tiny.html)
 6. ConvNeXt — Torchvision 0.28 documentation. (2024). Pytorch.Org. [https\://docs.pytorch.org/vision/0.28/models/convnext.html](https://docs.pytorch.org/vision/0.28/models/convnext.html)
 7. GeeksforGeeks. (2025, July 14). ConvNeXt. GeeksforGeeks. [https\://www\.geeksforgeeks.org/computer-vision/convnext/](https://www.geeksforgeeks.org/computer-vision/convnext/)
-8. Liu, Z., Mao, H., Wu, C.-Y., Feichtenhofer, C., Darrell, T., & Xie, S. (2022). A ConvNet for the 2020s. arXiv:2201.03545 \[Cs\]. [https\://arxiv.org/abs/2201.03545](https://arxiv.org/abs/2201.03545)

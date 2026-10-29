@@ -3,6 +3,7 @@
 Compare the full custom architecture with torchvision using identical trained
 weights, then measure initial gradients for two fixed input scalings. No
 optimizer update or performance claim is made by this diagnostic.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

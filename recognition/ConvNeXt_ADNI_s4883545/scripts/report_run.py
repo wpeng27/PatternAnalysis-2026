@@ -2,6 +2,7 @@
 
 The budget projection uses measured epochs and is explicitly an estimate.
 Final reports require a completed run and separate best-checkpoint validation.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

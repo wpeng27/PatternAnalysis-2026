@@ -4,6 +4,7 @@ Writes PNG and SVG metric/precision/recall curves and numeric inspection evidenc
 Training metrics are online measurements with changing weights and regularization,
 whereas validation is measured once after each epoch. Loss axes use a labelled
 log scale to retain large validation spikes without hiding smaller losses.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

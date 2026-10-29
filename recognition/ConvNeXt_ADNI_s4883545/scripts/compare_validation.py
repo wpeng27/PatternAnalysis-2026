@@ -4,6 +4,7 @@ Reads saved manifests, predictions, histories and local checkpoints only. No
 image loading, inference, retraining or test evaluation. Classification metrics
 are recomputed from P(AD). Slice cross-entropy is checked against selected history
 because rounded exported probabilities cannot reproduce logits-based CE exactly.
+AI-assisted implementation.
 """
 
 # Support direct script execution from any working directory.

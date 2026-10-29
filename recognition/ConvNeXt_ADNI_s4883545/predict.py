@@ -9,7 +9,7 @@ checkpoint. CPU runs use FP32 and may give slightly different probabilities.
 Manifest mode defaults to validation. --split test is an explicit evaluation,
 never a fresh holdout after prior test exposure. Individual images have unknown
 labels: folder names are not used to manufacture ground truth or metrics.
-AI-assisted implementation for Weijie Peng's COMP3710 project.
+AI-assisted implementation.
 """
 
 import argparse
