@@ -15,6 +15,7 @@
 9. [Failure cases and diagnostic experiments](#9-failure-cases-and-diagnostic-experiments)
 10. [Engineering recommendation](#10-engineering-recommendation)
 11. [Reproducibility and usage](#11-reproducibility-and-usage)
+12. [Artificial Intelligence Usage Disclosure](#12-artificial-intelligence-usage-disclosure)
 
 ## 1. Overview
 
@@ -300,3 +301,9 @@ Prediction restores architecture, EMA identity, preprocessing and CUDA precision
 The selected EMA checkpoint SHA-256 is `c1e792929e2cc7511489fa7807c96c8e895a80645c1aa273f52f44e42c0096f3`. CNN's is `722924cedcdd6afb053ed7967d04e1688e601b9f74909d6305d6af382e654fe5`. Compact evidence preserves identities, full-precision metrics, histories, confidence statistics and latency summaries. It permits inspection of report claims without private files, but cannot replace those files for rerunning inference.
 
 Verification completed during development includes patient/duplicate audits, known-label metric calculations, shape and finite-gradient checks, an optimizer update, checkpoint reloads and resumed training. The prediction milestone passed 35 targeted tests and reproduced every saved P(AD) value for both models on all 4,300 validation slices. The single-image CPU demonstration also ran. Latency's four tests and timing recomputation passed. These checks were completed during development. The entire test suite was not rerun during report preparation.
+
+## 12. Artificial Intelligence Usage Disclosure
+
+**Tools and scope.** I used OpenAI ChatGPT/Codex as a guidance and assistance tool throughout the project. This included support with project planning, literature and specification lookup, feasibility discussions, patient data parsing and validation, PyTorch architecture development, training and evaluation workflows, metrics, checkpointing, experimental improvements, plotting, confidence analysis, diagnostics, prediction demonstrations, latency measurement and report writing. AI was primarily used to explain concepts, suggest possible approaches, troubleshoot issues and provide example code or improvements. These suggestions were reviewed, adapted and integrated into my own implementation rather than being used without evaluation.
+
+**Verification and responsibility.** I independently reviewed, tested and refined the implementation using data audits, known-answer tests, architecture and gradient checks, checkpoint reloads, actual training results, prediction verification, confidence analysis and timing measurements. AI-generated suggestions were evaluated against experimental results and adjusted where necessary. All figures and metrics were produced using actual experimental data and validation inputs, rather than AI-generated MRI images or fabricated results. I maintained responsibility for implementation decisions, experimental evaluation, interpretation of results and the final report. AI served as a supporting resource for learning, problem-solving and improving the quality of my work, rather than replacing my own development and analysis.
