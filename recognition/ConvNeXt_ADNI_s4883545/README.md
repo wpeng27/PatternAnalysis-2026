@@ -8,6 +8,7 @@
 2. [Feasibility review](#2-feasibility-review)
 3. [Data, preprocessing and evaluation definitions](#3-data-preprocessing-and-evaluation-definitions)
 4. [Architecture and training protocol](#4-architecture-and-training-protocol)
+5. [Experiments and convergence](#5-experiments-and-convergence)
 
 ## 1. Overview
 
@@ -98,3 +99,27 @@ The CNN has three 3 x 3 convolution blocks with 16, 32 and 64 channels, each fol
 | Seed / workers / CPU threads | 42 / 0 / 4 | Same |
 
 Bias/1D exclusions follow the [official optimizer grouping](https://github.com/facebookresearch/ConvNeXt/blob/main/optim_factory.py). EMA follows the update-after-optimizer pattern in the [official engine](https://github.com/facebookresearch/ConvNeXt/blob/main/engine.py), with a local successful-update check and fixed decay. EMA weights drive validation, scheduling, stopping and prediction. Best/last checkpoints preserve model settings, preprocessing, class mapping, optimizer, scheduler, epoch and random state. These choices differ between pipelines, so this is not an architecture-only ablation.
+
+## 5. Experiments and convergence
+
+The table summarises the experiments included in this report. I report outcomes at the checkpoint selected by validation loss. The hypotheses describe my reasons for trying each strategy. Comparisons use one seed, different stopping epochs and some continued training lineages, which limits causal claims. A dash means that checkpoint was not evaluated on test.
+
+| Strategy and hypothesis | Changed setting | Selected epoch / completed | Validation accuracy / loss | Test accuracy |
+|---|---|---:|---:|---:|
+| CNN: establish a low-cost reference | Three convolution blocks, LR 1e-3, FP16 | 18 / 20 | 92.19% / 0.220289 | 71.31%, frozen |
+| BF16: avoid FP16 overflows | BF16, LR 3e-4, unit inputs, no augmentation | 5 / 10 | 52.09% / 0.689988 | - |
+| Centering: improve optimization | Scale [0,1] to [-1,1] | 2 / 7 | 70.53% / 0.659615 | - |
+| Lower LR: stabilize updates | 3e-4 to 3e-5 | 2 / 7 | 73.79% / 0.525159 | - |
+| Affine: improve generalization | Add mild affine transforms | 20 / 20 | 79.00% / 0.438211 | - |
+| More epochs: extend a progressing run | Continue affine lineage to 30 | 29 / 30 | 80.12% / 0.427508 | 70.72%, frozen |
+| Further continuation: reduce remaining loss | Continue toward 40 after test exposure | 34 / 39 | 80.42% / 0.413108 | - |
+| Intermediate LR: balance progress/stability | Fresh affine run at 1e-4 | 24 / 29 | 85.79% / 0.338677 | 72.10%, exploratory |
+| Grouped decay: avoid shrinking biases/1D parameters | Decay 0.01 for multidimensional weights, otherwise zero | 21 / 26 | 86.81% / 0.318166 | 73.33%, exploratory |
+| EMA: smooth noisy weight updates | Fixed decay 0.999 with grouped decay | 29 / 34 | **89.53% / 0.291337** | **74.40%, exploratory** |
+| Warmup/cosine: improve LR trajectory | Three warmup epochs, start factor 0.01, 40-epoch cosine horizon | 19 / 24 | 85.63% / 0.343083 | 72.17%, exploratory |
+
+An earlier one-epoch FP16 ConvNeXt trial skipped 33 of 1,077 attempted optimizer updates and was excluded from quality comparison. The BF16 lineage recorded zero skipped updates. Grouped decay improved selected validation loss over the all-decay LR 1e-4 control. EMA improved it further. Warmup/cosine performed worse than its control. Cosine stopped before completing its planned decay horizon. I therefore retained EMA based on validation evidence. These comparisons do not establish that each observed difference isolates one causal factor.
+
+![Training and validation loss and accuracy, with selected checkpoints](report/figures/learning_curves.png)
+
+CNN training loss fell from 0.5169 to 0.0541, but validation was unstable: epoch 16 reached loss 6.7379 and accuracy 49.00% before recovery. Epoch 18 minimizes loss. Epoch 20's 92.49% accuracy does not override its higher 0.233174 loss. EMA validation loss fell from 0.687097 to 0.291337 at epoch 29. Epochs 30-34 did not improve it, triggering early stopping. Epoch 34 reached 90.09% validation accuracy while online training accuracy reached 94.41%. This indicates diminishing validation-loss gains, not evidence that more epochs would improve unseen patients. Training curves use changing online weights and regularization, while EMA validation uses averaged weights. Both loss panels use a logarithmic axis to retain the CNN spike.
